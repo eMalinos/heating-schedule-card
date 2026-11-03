@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import {
   normalizeConfig, circuitName, parseSchedule, toPayload, effective, slotAt, groupByProgram, daysLabel, tempColor, fmtTemp, fmtTime,
   loadSchedules, saveSchedule, removeSchedule, nowState, DASH, isFallbackProgram, barSegments, slotsSummary,
-  normalizeSlots, splitSlot, removeSlot, moveBoundary, setTemp, daysConflict, planCopy,
+  normalizeSlots, splitSlot, removeSlot, moveBoundary, setTemp, daysConflict, planCopy, copyable,
 } from '../dist/heating-schedule-card.js';
 
 process.env.TZ = 'Europe/Prague'; // the DST test needs a zone with a spring-forward day
@@ -556,4 +556,27 @@ test('planCopy: an edited target schedule keeps its slots, toPayload keeps its n
   const body = toPayload(p.edit[0], a1);
   assert.deepEqual([body.schedule_id, body.name, body.start_date, body.weekdays], [a1.id, 'Můj', '2026-01-01', ['tue']]);
   assert.deepEqual(body.timeslots.map((t) => t.start), ['00:00:00', '08:00:00']);
+});
+
+test('planCopy: weekdays two selected schedules both want go to the first, the note names the rest', () => {
+  const s1 = mk(SRC, 'auto', WORK), s2 = mk(SRC, 'even', ['tue', 'wed', 'thu', 'fri', 'sat']);
+  const p = plan([s1, s2], { mode: 'one', scheduleIds: [s1.id, s2.id], targetProgram: 'vac', targets: [A], conflict: 'replace' });
+  assert.deepEqual(shape(p).add, [[A, 'vac', WORK.join(), '0/20'], [A, 'vac', 'sat', '0/20']]);
+  assert.equal(p.notes[A], 'Út–Pá z programu Sudý se nekopírují, Výchozí je už má.');
+});
+
+test('planCopy: a read-only target schedule gets only its own note, it is not a "hit"', () => {
+  const s1 = mk(SRC, 'auto', WORK);
+  const aRo = mk(A, 'auto', ['mon'], [[0, 20]], { item: { repeat_type: 'single' } });
+  const p = plan([s1, aRo], { mode: 'one', scheduleIds: [s1.id], targets: [A], conflict: 'replace' });
+  assert.equal(p.notes[A], 'Výchozí má rozvrh jen ke čtení, ten zůstane.');
+  assert.deepEqual(shape(p).add, [[A, 'auto', 'tue,wed,thu,fri', '0/20']]);
+  const whole = plan([s1, aRo], { mode: 'valve', programs: ['auto'], targets: [A], conflict: 'fill' });
+  assert.equal(whole.notes[A], 'Výchozí má rozvrh jen ke čtení, ten zůstane.');
+});
+
+test('copyable: editable, not paused, single-valve schedules of the source', () => {
+  const ok = mk(SRC, 'auto', ALL), paused = mk(SRC, 'auto', ALL, [[0, 20]], { tags: ['paused'] });
+  const ro = mk(SRC, 'auto', ALL, [[0, 20]], { item: { repeat_type: 'single' } }), other = mk(A, 'auto', ALL);
+  assert.deepEqual(copyable([ok, paused, ro, other], SRC).map((x) => x.id), [ok.id]);
 });

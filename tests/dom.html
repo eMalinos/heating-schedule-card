@@ -460,8 +460,8 @@
     const K = 'climate.kitchen_valve', BD = 'climate.bedroom_valve', HL = 'climate.hall_valve';
     const cst = { ...bed, [HL]: { state: 'heat', attributes: { friendly_name: 'Chodba' } } };
     const ccfg = { circuits: [{ id: CID, valves: [K, BD, HL] }] };
-    const mkStore = (init, failAdd = 0) => {
-      const S = { items: [...init], log: [], n: 0, adds: 0 };
+    const mkStore = (init, failAdd = 0, failRemove = 0) => {
+      const S = { items: [...init], log: [], n: 0, adds: 0, removes: 0 };
       S.hass = mkHass({
         states: cst, callWS: async () => S.items,
         callApi: async (m, path, body) => {
@@ -471,7 +471,10 @@
             const id = 'n' + ++S.n;
             S.items = [...S.items, { schedule_id: id, entity_id: 'switch.schedule_' + id, weekdays: body.weekdays, repeat_type: 'repeat', tags: body.tags, name: body.name, timeslots: body.timeslots }];
           } else if (path === 'scheduler/edit') S.items = S.items.map((x) => (x.schedule_id === body.schedule_id ? { ...x, weekdays: body.weekdays, tags: body.tags, timeslots: body.timeslots } : x));
-          else if (path === 'scheduler/remove') S.items = S.items.filter((x) => x.schedule_id !== body.schedule_id);
+          else if (path === 'scheduler/remove') {
+            if (failRemove && ++S.removes === failRemove) throw new Error('remove failed');
+            S.items = S.items.filter((x) => x.schedule_id !== body.schedule_id);
+          }
         },
       });
       return S;
@@ -504,7 +507,7 @@
     // Nahradit: removes, then adds, valve by valve; the program tag and the slots come from the source
     click(c21, '[data-a="cp-go"]');
     await tick(400);
-    r.copyReplace = S.log.join() === 'remove:777076,remove:087523,add,add,add,add' && c21._view === 'week'
+    r.copyReplace = S.log.join() === 'add,add,remove:777076,remove:087523,add,add' && c21._view === 'week'
       && mineOf(S, BD).length === 2 && mineOf(S, HL).length === 2 && mineOf(S, K).length === 2
       && mineOf(S, BD).map((x) => x.timeslots[0].actions[0].service_data.temperature).sort().join() === kitchenTemps
       && mineOf(S, HL).every((x) => x.tags.some((t) => t.startsWith('program:')) && x.timeslots.length === 1);
@@ -542,13 +545,17 @@
     r.copyOneFill = s23.querySelector('.note.stack').textContent.includes('Ložnice: nic nedoplní, dny už v Výchozí má.') && !btnOn(c23, '[data-a="cp-go"]');
     // Nahradit with a different target program: the daily Dovolená schedule of the target is replaced
     click(c23, '[data-a="cp-conf"][data-k="replace"]');
+    c23._copy.errors = { [BD]: 'old error' };
+    c23._render(true);
     const psel = s23.querySelector('select[data-a="cp-prog"]');
+    psel.click(); // a click on the select neither rebuilds it nor clears the errors
+    r.copyProgClick = s23.querySelector('select[data-a="cp-prog"]') === psel && !!s23.querySelector('.err');
     psel.value = 'vacation';
     psel.dispatchEvent(new Event('change', { bubbles: true }));
     click(c23, '[data-a="cp-go"]');
     await tick(300);
-    r.copyOneReplace = S.log.join() === 'remove:087523,add' && mineOf(S, BD).length === 2
-      && mineOf(S, BD).filter((x) => x.tags.includes('program:vacation')).length === 1 && c23._view === 'week';
+    r.copyOneReplace = S.log.join() === 'add,remove:087523' && mineOf(S, BD).length === 2
+      && mineOf(S, BD).filter((x) => x.tags.includes('program:vacation')).length === 1 && c23._view === 'editor' && !!s23.querySelector('.edbar') && c23._copy === null;
     c23.remove();
 
     // stored schedules changed since the preview: nothing is written
@@ -573,8 +580,61 @@
     click(c25, '[data-a="cp-go"]');
     await tick(500);
     r.copyRollback = c25._view === 'copy' && s25.querySelector('.err')?.textContent === 'Chyba: Chodba: add failed'
-      && mineOf(S, HL).length === 0 && mineOf(S, BD).length === 2 && S.log.join() === 'remove:777076,remove:087523,add,add,add,add,remove:n3';
+      && mineOf(S, HL).length === 0 && mineOf(S, BD).length === 2 && S.log.join() === 'add,add,remove:777076,remove:087523,add,add,remove:n3';
     c25.remove();
+
+    // the first add of a valve fails: its replaced schedules are not touched, the other valve goes through
+    S = mkStore(fixture, 1);
+    const c26 = await mkCard(S.hass, { ...ccfg, valve: K });
+    click(c26, '[data-a="copyOpen"]');
+    click(c26, '[data-a="cp-tgt"][data-k="' + BD + '"]');
+    click(c26, '[data-a="cp-tgt"][data-k="' + HL + '"]');
+    click(c26, '[data-a="cp-go"]');
+    await tick(500);
+    r.copyAddFails = S.log.join() === 'add,add,add' && mineOf(S, BD).length === 2 && mineOf(S, BD).every((x) => x.schedule_id.length === 6)
+      && mineOf(S, HL).length === 2 && c26.shadowRoot.querySelector('.err')?.textContent === 'Chyba: Ložnice: add failed';
+    c26.remove();
+
+    // a remove fails after the copies were added: the valve is put back as it was, the removed schedule from its stored version
+    S = mkStore(fixture, 0, 2);
+    const c27 = await mkCard(S.hass, { ...ccfg, valve: K });
+    click(c27, '[data-a="copyOpen"]');
+    click(c27, '[data-a="cp-tgt"][data-k="' + BD + '"]');
+    click(c27, '[data-a="cp-go"]');
+    await tick(500);
+    const bdNow = mineOf(S, BD);
+    r.copyRemoveFails = S.log.join() === 'add,add,remove:777076,remove:087523,remove:n1,remove:n2,add'
+      && bdNow.length === 2 && bdNow.map((x) => x.tags.join()).sort().join('|') === fixture.filter((x) => valveOf(x) === BD).map((x) => x.tags.join()).sort().join('|')
+      && bdNow.map((x) => x.timeslots[0].actions[0].service_data.temperature).sort().join() === '16,21'
+      && c27.shadowRoot.querySelector('.err')?.textContent === 'Chyba: Ložnice: remove failed';
+    c27.remove();
+
+    // the editor's copy button needs a saved, active schedule
+    S = mkStore([fixture[0], { ...fixture[1], tags: [...fixture[1].tags, 'paused'] }]);
+    const c28 = await mkCard(S.hass, { ...ccfg, valve: K });
+    const s28 = c28.shadowRoot;
+    click(c28, '.row [data-a="open"]');
+    const cpBtn = () => s28.querySelector('[data-a="copy"]');
+    r.edCopyOn = !cpBtn().disabled;
+    click(c28, '[data-a="day"][data-k="mon"]');
+    r.edCopyDirty = cpBtn().disabled && s28.textContent.includes('Nejdřív uložte rozvrh');
+    click(c28, '[data-a="day"][data-k="mon"]');
+    r.edCopyClean = !cpBtn().disabled;
+    click(c28, '[data-a="back"][data-k=""]');
+    click(c28, '.chip[data-id="vacation"]');
+    click(c28, '.row [data-a="open"]');
+    r.edCopyPaused = cpBtn().disabled && s28.textContent.includes('Pozastavený rozvrh se nekopíruje');
+    c28.remove();
+
+    // programs per valve are computed once, not on every render
+    S = mkStore(fixture);
+    const c29 = await mkCard(S.hass, { ...ccfg, valve: K });
+    click(c29, '[data-a="copyOpen"]');
+    const pi = c29._pi;
+    c29._render(true);
+    c29._render(true);
+    r.programInfoCached = !!pi && c29._pi === pi && Object.keys(pi.byValve).join() === [K, BD, HL].join();
+    c29.remove();
 
 
     r.noErrors = errors.length === 0;
