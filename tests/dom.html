@@ -720,13 +720,13 @@
     const mkHA = (list, extraStates = {}, progList = [{ id: 'odd', name: 'Lichý týden' }, { id: 'vacation', name: 'Dovolená' }]) => {
       const A = { items: list, log: [], svc: [], failRemove: 0, removes: 0, states: {
         ...hass.states, [K]: { state: 'heat', attributes: { friendly_name: 'Kuchyň', temperature: 21 } },
-        [ALT]: { state: 'on', attributes: {} }, [HOL]: { state: 'cz', attributes: {} }, [CAL]: { state: '', attributes: {} },
+        [ALT]: { state: 'on', attributes: {} }, [HOL]: { state: 'none', attributes: {} }, [CAL]: { state: '', attributes: {} },
         ...progSensors(progList),
         ...extraStates,
       }, failScript: false, noScript: false };
       A.hass = {
         states: A.states, themes: {},
-        callWS: async (m) => (m.type === 'call_service' ? { response: { 'calendar.cz': { events: [{ start: '2026-12-24', summary: 'Štědrý den' }] } } } : A.items),
+        callWS: async (m) => A.items,
         callApi: async (m, path, body) => {
           A.log.push(path.split('/')[1] + (body.schedule_id ? ':' + body.schedule_id : ''));
           if (path === 'scheduler/add') A.items = [...A.items, { ...mkItem('n' + A.items.length + A.log.length, body.weekdays, body.tags), timeslots: body.timeslots }];
@@ -770,7 +770,7 @@
 
     // a holiday today: the now tile says so (a calendar holiday, today's date)
     A = mkHA([mkItem('hs', ['sun'], ['program:auto'], 17), mkItem('hw', DAYS7.filter((d) => d !== 'sun'), ['program:auto'], 21)],
-      { [HOL]: { state: 'calendar', attributes: {} }, [HP]: { state: '0', attributes: { programs: [], holiday_dates: [M.ymd(now0)] } } });
+      { [HOL]: { state: 'calendar', attributes: {} }, [HP]: { state: '0', attributes: { programs: [], holidays: [{ date: M.ymd(now0), name: 'x' }] } } });
     cw = await mkCard(A.hass, cfgK);
     r.v2Holiday = text(cw, '.now .tx .sec') === 'Svátek · podle neděle' && text(cw, '.now .big').startsWith('17');
     cw.remove();
@@ -851,7 +851,7 @@
 
     // settings: the alternation switch, holiday tabs, the calendar picker, the next holidays
     A = mkHA([mkItem('wd', DAYS7, ['program:auto'], 20)], {
-      [HOL]: { state: 'none', attributes: {} }, 'calendar.cz': { state: 'off', attributes: {} },
+      [HOL]: { state: 'none', attributes: {} }, 'calendar.czechia': { state: 'off', attributes: {} },
       [`sensor.heating_schedule_${CID}`]: { state: 'auto', attributes: { targets: { [K]: 20 }, holidays_next: [{ date: '2026-12-24', name: 'Štědrý den' }, { date: '2026-12-25', name: null }] } },
     });
     cw = await mkCard(A.hass, cfgK);
@@ -864,25 +864,60 @@
     await tick(50);
     r.v2Alt = JSON.stringify(A.svc) === JSON.stringify([{ domain: 'input_boolean', service: 'toggle', data: { entity_id: ALT } }]);
     A.svc.length = 0;
-    click(cw, '.tab[data-k="cz"]');
-    await tick(50);
-    cw.hass = { ...A.hass };
-    r.v2Hol = JSON.stringify(A.svc) === JSON.stringify([{ domain: 'input_select', service: 'select_option', data: { entity_id: HOL, option: 'cz' } }])
-      && sr3.querySelector('.tab[aria-pressed="true"]').textContent === 'České'
-      && [...sr3.querySelectorAll('.hols .h')].map((x) => x.textContent).join('|') === '24. 12.Štědrý den|25. 12.' && sr3.textContent.includes('ve svátek se jede podle rozvrhu neděle');
-    A.svc.length = 0;
-    A.states['sensor.heating_schedule_' + CID] = { state: 'auto', attributes: { targets: { [K]: 20 }, holidays_next: [{ date: '2026-12-24', name: null }, { date: '2026-12-25', name: null }] } };
+    r.v2TwoTabs = [...sr3.querySelectorAll('.tab')].map((x) => x.textContent).join('|') === 'Žádné|Z kalendáře';
     click(cw, '.tab[data-k="calendar"]');
     await tick(100);
+    A.states[HOL] = { state: 'calendar', attributes: {} }; // what the select does
+    A.states[CAL] = { state: 'calendar.czechia', attributes: {} };
+    A.states[HP] = { ...A.states[HP], attributes: { ...A.states[HP].attributes, holidays: [{ date: '2026-12-24', name: 'Štědrý den' }, { date: '2026-12-25', name: '1. svátek vánoční' }] } };
+    A.states['sensor.heating_schedule_' + CID] = { state: 'auto', attributes: { targets: { [K]: 20 }, holidays_next: [{ date: '2026-12-24', name: 'Štědrý den' }, { date: '2026-12-25', name: '1. svátek vánoční' }] } };
     cw.hass = { ...A.hass };
+    await tick(50);
+    // Z kalendáře with nothing stored: calendar.czechia is written first, then the mode
+    r.v2Hol = JSON.stringify(A.svc.map((x) => [x.domain, x.service, x.data.entity_id, x.data.option ?? x.data.value])) === JSON.stringify([['input_text', 'set_value', CAL, 'calendar.czechia'], ['input_select', 'select_option', HOL, 'calendar']])
+      && sr3.querySelector('.tab[aria-pressed="true"]').textContent === 'Z kalendáře'
+      && [...sr3.querySelectorAll('.hols .h')].map((x) => x.textContent).join('|') === '24. 12.Štědrý den|25. 12.1. svátek vánoční' && sr3.textContent.includes('ve svátek se jede podle rozvrhu neděle');
+    A.svc.length = 0;
     const calSel = sr3.querySelector('select[data-a="st-cal"]');
-    r.v2CalPicker = !!calSel && [...calSel.options].map((o) => o.value).join() === ',calendar.cz' && sr3.textContent.includes('Kalendář přidáte integrací Holiday');
-    calSel.value = 'calendar.cz';
-    calSel.dispatchEvent(new Event('change', { bubbles: true }));
-    await tick(150);
+    r.v2CalPicker = !!calSel && [...calSel.options].map((o) => o.value).join() === ',calendar.czechia' && calSel.value === 'calendar.czechia'
+      && sr3.textContent.includes('Svátky přidáte integrací Holiday') && sr3.textContent.includes('země Česko');
+    A.states[`sensor.heating_programs_${CID}`].attributes.holiday_error = 'boom';
     cw.hass = { ...A.hass };
-    r.v2Cal = A.svc.some((x) => x.domain === 'input_text' && x.data.entity_id === CAL && x.data.value === 'calendar.cz')
-      && [...sr3.querySelectorAll('.hols .h')].map((x) => x.textContent).join('|') === '24. 12.Štědrý den|25. 12.'; // 25. 12. has no event: blank
+    await tick(50);
+    r.v2CalErr = sr3.textContent.includes('Kalendář se nenačetl: boom');
+    A.states[`sensor.heating_programs_${CID}`].attributes.holiday_error = null;
+    // the active tab does nothing; an empty stored calendar shows the placeholder, not a default
+    A.svc.length = 0;
+    click(cw, '.tab[data-k="calendar"]');
+    await tick(50);
+    const act = A.svc.length === 0;
+    A.states[CAL] = { state: '', attributes: {} };
+    cw.hass = { ...A.hass };
+    await tick(50);
+    const sel0 = sr3.querySelector('select[data-a="st-cal"]');
+    r.v2ActiveTab = act && !!sel0 && sel0.value === '' && sr3.querySelector('.sel b').textContent === 'Vyberte kalendář';
+    // a failing calendar write leaves the mode alone
+    A.states[HOL] = { state: 'none', attributes: {} };
+    const okSvc = A.hass.callService;
+    A.hass.callService = async (d, sv, data) => { if (d === 'input_text') { A.svc.push({ domain: d, service: sv, data }); throw new Error('no write'); } return okSvc(d, sv, data); };
+    cw.hass = { ...A.hass };
+    A.svc.length = 0;
+    click(cw, '.tab[data-k="calendar"]');
+    await tick(50);
+    r.v2CalWriteFails = A.svc.length === 1 && A.svc[0].domain === 'input_text' && A.states[HOL].state === 'none' && sr3.textContent.includes('no write');
+    A.hass.callService = okSvc;
+    // no input_text entity (old heating): nothing is written, the card says so
+    delete A.states[CAL];
+    cw.hass = { ...A.hass };
+    A.svc.length = 0;
+    click(cw, '.tab[data-k="calendar"]');
+    await tick(50);
+    r.v2OldHeating = A.svc.length === 0 && sr3.textContent.includes('Heating je starší, aktualizujte ho');
+    A.states[CAL] = { state: '', attributes: {} };
+    A.states[HOL] = { state: 'cz', attributes: {} }; // a stored value outside none / calendar shows as Žádné
+    cw.hass = { ...A.hass };
+    await tick(50);
+    r.v2StaleCz = sr3.querySelector('.tab[aria-pressed="true"]').textContent === 'Žádné' && !sr3.querySelector('.hols') && !sr3.querySelector('.tab[data-k="cz"]');
     click(cw, '[data-a="st-back"]');
     r.v2SettingsBack = !!cw.shadowRoot.querySelector('.now');
     click(cw, '[data-a="cog"]');
