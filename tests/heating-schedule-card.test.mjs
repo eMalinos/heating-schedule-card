@@ -32,9 +32,14 @@ test('normalizeConfig: required parts and errors', () => {
   assert.equal(n.timeStep, 15);
   assert.equal(normalizeConfig({ ...ok, time_step: 30 }).timeStep, 30);
   assert.equal(normalizeConfig(ok).valve, null);
+  // a valve outside the configured circuits may be discovered later: the card checks it; the first circuit listing a valve wins
+  assert.equal(normalizeConfig({ ...ok, valve: 'climate.nope' }).valve, 'climate.nope');
+  const dup = normalizeConfig({ circuits: [{ id: 'c1', valves: [V] }, { id: 'c2', valves: [V, 'climate.c'] }, { id: 'c3', valves: [V] }] });
+  assert.deepEqual(dup.circuits.map((c) => [c.id, c.valves]), [['c1', [V]], ['c2', ['climate.c']]]);
+  assert.equal(dup.valveCircuit[V], 'c1');
   const bad = /^Error: heating-schedule-card: /;
   for (const c of [undefined, {}, { circuits: [] }, { circuits: [{ valves: [V] }] }, { circuits: [{ id: 'c', valves: [] }] },
-    { circuits: [{ id: 'c', valves: ['sensor.x'] }] }, { ...ok, valve: 'climate.nope' }, { ...ok, time_step: 7 }]) {
+    { circuits: [{ id: 'c', valves: ['sensor.x'] }] }, { ...ok, time_step: 7 }]) {
     assert.throws(() => normalizeConfig(c), bad);
   }
 });
@@ -147,9 +152,9 @@ test('effective: program day, fallback, paused', () => {
 test('slotAt: slot, next, carry-over, fallback, paused', () => {
   const s = sched(THREE);
   const r = slotAt([s], V, 'auto', at(2026, 11, 2, 7, 0));
-  assert.deepEqual({ ...r, schedule: undefined }, { temp: 21, start: 360, end: 1200, fromYesterday: false, schedule: undefined, isFallback: false, next: { start: 1200, temp: 19, tomorrow: false, days: 0 } });
+  assert.deepEqual({ ...r, schedule: undefined }, { temp: 21, start: 360, end: 1200, fromYesterday: false, schedule: undefined, isFallback: false, boundary: { start: 1200, temp: 19, days: 0 }, next: { start: 1200, temp: 19, days: 0 } });
   // last slot: next is tomorrow's first
-  assert.deepEqual(slotAt([s], V, 'auto', at(2026, 11, 2, 22, 0)).next, { start: 0, temp: 18, tomorrow: true, days: 1 });
+  assert.deepEqual(slotAt([s], V, 'auto', at(2026, 11, 2, 22, 0)).next, { start: 0, temp: 18, days: 1 });
   // exactly at a start counts as that slot
   assert.equal(slotAt([s], V, 'auto', at(2026, 11, 2, 6, 0)).temp, 21);
   // carry-over: Monday 00:00 Sunday's only schedule has a 00:00 slot -> own slot; use a gap-free-less schedule instead
@@ -158,7 +163,7 @@ test('slotAt: slot, next, carry-over, fallback, paused', () => {
   const c = slotAt([evening, monday], V, 'auto', at(2026, 11, 2, 5, 0)); // Mon 05:00, before Monday's first slot
   assert.equal(c.temp, 17);
   assert.equal(c.fromYesterday, true);
-  assert.deepEqual(c.next, { start: 360, temp: 21, tomorrow: false, days: 0 });
+  assert.deepEqual(c.next, { start: 360, temp: 21, days: 0 });
   // fallback to auto on a day the program has nothing
   const auto = sched([['00:00:00', '00:00:00', 21]], { tags: ['program:auto'] });
   const vacMon = sched([['00:00:00', '00:00:00', 16]], { tags: ['program:vacation'], weekdays: ['mon'] });
@@ -241,7 +246,7 @@ test('slotAt: calendar days across the spring-forward date', () => {
   const r = slotAt([sun, mon], V, 'auto', at(2026, 3, 30, 0, 30));
   assert.equal(r.temp, 17);
   assert.equal(r.fromYesterday, true);
-  assert.deepEqual(slotAt([sun, mon], V, 'auto', at(2026, 3, 29, 22, 0)).next, { start: 360, temp: 21, tomorrow: true, days: 1 });
+  assert.deepEqual(slotAt([sun, mon], V, 'auto', at(2026, 3, 29, 22, 0)).next, { start: 360, temp: 21, days: 1 });
 });
 
 test('multi-valve schedule: read-only, counts for each of its valves', () => {
@@ -588,7 +593,7 @@ test('slotAt: next skips slots with the same temperature', () => {
   // Mon-Tue: 21 all day; Wed has 18 from 06:00 -> next is Wed 06:00, two days ahead
   const wed = sched([['00:00:00', '06:00:00', 21], ['06:00:00', '00:00:00', 18]], { weekdays: ['wed'] });
   const mon = sched([['00:00:00', '12:00:00', 21], ['12:00:00', '00:00:00', 21]], { weekdays: ['mon', 'tue'] });
-  assert.deepEqual(slotAt([mon, wed], V, 'auto', at(2026, 11, 2, 14, 0)).next, { start: 360, temp: 18, tomorrow: false, days: 2 });
+  assert.deepEqual(slotAt([mon, wed], V, 'auto', at(2026, 11, 2, 14, 0)).next, { start: 360, temp: 18, days: 2 });
 });
 
 test('discoverCircuits: states-only circuits, config wins, a valve stays in one circuit', () => {
@@ -600,4 +605,21 @@ test('discoverCircuits: states-only circuits, config wins, a valve stays in one 
     'sensor.heating_schedule_d': { attributes: {} },
   };
   assert.deepEqual(discoverCircuits(states, cfg), [{ id: 'b', name: null, valves: ['climate.z'] }]);
+});
+
+test('slotAt: boundary = next slot start of any temperature; manual tile uses it', () => {
+  const mon = sched([['00:00:00', '12:00:00', 21], ['12:00:00', '00:00:00', 21]], { weekdays: ['mon'] });
+  const r = slotAt([mon], V, 'auto', at(2026, 11, 2, 10, 0));
+  assert.deepEqual(r.boundary, { start: 720, temp: 21, days: 0 });
+  assert.equal(r.next, null); // nothing changes within 7 days
+  const st = states({ [V]: { state: 'heat', attributes: { temperature: 23 } }, [`sensor.heating_schedule_${C}`]: { state: 'auto', attributes: { targets: { [V]: 21 } } } });
+  const n = nowState({ states: st, circuit: C, valve: V, schedules: [mon], program: 'auto', now: at(2026, 11, 2, 10, 0), nValves: 1 });
+  assert.equal(n.kind, 'manual');
+  assert.equal(n.sub, 'Rozvrh to v 12:00 vrátí na 21 °C');
+});
+
+test('nowState: a change exactly a week ahead reads "příští"', () => {
+  const mon = sched([['00:00:00', '06:00:00', 19], ['06:00:00', '00:00:00', 21]], { weekdays: ['mon'] });
+  const n = nowState({ states: {}, circuit: C, valve: V, schedules: [mon], program: 'auto', now: at(2026, 11, 2, 7, 0) });
+  assert.equal(n.text, 'Teď 21 °C, od příští Po 00:00 19 °C');
 });

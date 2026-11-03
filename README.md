@@ -22,7 +22,7 @@ Settings → Dashboards → ⋮ → Resources → Add resource → URL `/local/h
 
 ```yaml
 type: custom:heating-schedule-card
-valve: climate.obyvak_valve        # optional: preselected valve; none = the first valve of the first circuit
+valve: climate.obyvak_valve        # optional: preselected valve (configured or discovered); none = the first valve of the first circuit
 circuits:                           # required: configured circuits; every other heating circuit in the states is added automatically
   - id: heating_circuit_1           # heating instance = area id; entity ids derive from it
     name: Přízemí                   # optional: default = attribute `title` of binary_sensor.heating_state_<id>, else the id

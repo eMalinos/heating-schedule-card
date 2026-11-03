@@ -444,9 +444,10 @@
     r.pickerProgs1 = optIds() === 'auto,odd,vacation';
     s19.querySelector('select[data-a="pickprog"]').value = 'odd';
     s19.querySelector('select[data-a="pickprog"]').dispatchEvent(new Event('change', { bubbles: true }));
-    click(c19, '[data-a="pv"][data-k="climate.bedroom_valve"]'); // in both circuits: only the common programs
-    r.pickerProgs2 = optIds() === 'auto' && c19._pick.program === 'auto';
-    click(c19, '[data-a="pv"][data-k="climate.far_valve"]');
+    click(c19, '[data-a="pv"][data-k="climate.bedroom_valve"]'); // listed in both circuits = in the first one only
+    r.pickerProgs2 = optIds() === 'auto,odd,vacation' && c19._pick.program === 'odd';
+    click(c19, '[data-a="pv"][data-k="climate.far_valve"]'); // other circuit: only the common programs
+    r.pickerProgs2 = r.pickerProgs2 && optIds() === 'auto' && c19._pick.program === 'auto';
     click(c19, '[data-a="go"]');
     r.batchDedup = c19._ed.valves.join() === 'climate.kitchen_valve,climate.bedroom_valve,climate.far_valve';
     r.batchOnce = new Set(c19._ed.valves).size === c19._ed.valves.length;
@@ -638,13 +639,68 @@
 
     // a circuit that exists only in the states (not in the config) is offered in the copy view
     const FAR = 'climate.far_valve';
+    const farStates = (targets) => ({ ...cst, [FAR]: { state: 'heat', attributes: { friendly_name: 'Daleko' } }, 'sensor.heating_schedule_c2': { state: 'ok', attributes: { targets } } });
     S = mkStore(fixture);
-    S.hass.states = { ...cst, [FAR]: { state: 'heat', attributes: { friendly_name: 'Daleko' } }, 'sensor.heating_schedule_c2': { state: 'ok', attributes: { targets: { [FAR]: 20 } } } };
+    S.hass.states = farStates({ [FAR]: 20 });
     const c30 = await mkCard(S.hass, { ...ccfg, valve: K });
     click(c30, '[data-a="copyOpen"]');
     r.discoveredCopyTarget = !!c30.shadowRoot.querySelector('.tile[data-a="cp-tgt"][data-k="' + FAR + '"]');
     c30.remove();
 
+    // the shown valve of a circuit that vanishes falls back to the first valve; no error
+    const errs0 = errors.length;
+    S = mkStore(fixture);
+    S.hass.states = farStates({ [FAR]: 20 });
+    const c31 = await mkCard(S.hass, ccfg);
+    const sel31 = c31.shadowRoot.querySelector('select[data-a="valve"]');
+    sel31.value = FAR;
+    sel31.dispatchEvent(new Event('change', { bubbles: true }));
+    r.discShown = c31._valve === FAR && c31.shadowRoot.textContent.includes('Daleko');
+    c31.hass = { ...S.hass, states: farStates({}) };
+    r.vanished = c31._valve === K && c31.shadowRoot.textContent.includes('Kuchyň') && errors.length === errs0;
+    c31.remove();
+
+    // hass before setConfig does not throw and renders once the config arrives
+    const c32 = document.createElement('heating-schedule-card');
+    let early = true;
+    try { c32.hass = S.hass; } catch { early = false; }
+    c32.setConfig(ccfg);
+    document.getElementById('box').appendChild(c32);
+    await tick(150);
+    r.hassFirst = early && c32.shadowRoot.textContent.includes('Kuchyň');
+    c32.remove();
+
+    // `valve` preselect: a discovered valve is fine, a valve in no circuit shows the config error
+    const c33 = await mkCard(S.hass, { ...ccfg, valve: FAR });
+    S.hass.states = farStates({ [FAR]: 20 });
+    c33.hass = { ...S.hass };
+    r.valveDiscovered = c33._valve === FAR && c33.shadowRoot.textContent.includes('Daleko') && !c33.shadowRoot.querySelector('.err');
+    c33.remove();
+    const c34 = await mkCard(S.hass, { ...ccfg, valve: 'climate.nope' });
+    r.valveUnknown = !!c34.shadowRoot.querySelector('.err')?.textContent.includes('climate.nope');
+    c34.remove();
+
+    // turn-off: a discovered valve's schedule is turned off only when this card added it
+    let ev35 = null;
+    const calls35 = [];
+    S = mkStore(fixture);
+    S.hass.states = { ...farStates({ [FAR]: 20 }), 'switch.schedule_n1': { state: 'on' }, 'switch.schedule_f1': { state: 'on' } };
+    S.hass.connection = { subscribeMessage: async (cb) => { ev35 = cb; return () => {}; } };
+    S.hass.callService = async (d, sv, data) => { calls35.push(data.entity_id); };
+    const c35 = await mkCard(S.hass, { ...ccfg, valve: K });
+    click(c35, '[data-a="copyOpen"]');
+    click(c35, '[data-a="cp-tgt"][data-k="' + FAR + '"]');
+    click(c35, '[data-a="cp-pt"][data-k="vacation"]'); // only Výchozí: the circuit of FAR has no other program
+    click(c35, '[data-a="cp-go"]');
+    await tick(400);
+    const fx = fixture.find((x) => x.timeslots[0].actions[0].entity_id === K);
+    S.items = [...S.items, { ...fx, schedule_id: 'f1', entity_id: 'switch.schedule_f1', weekdays: ['sun'], tags: ['program:auto'],
+      timeslots: [{ ...fx.timeslots[0], actions: [{ ...fx.timeslots[0].actions[0], entity_id: FAR, service_data: { temperature: 17 } }] }] }];
+    ev35({ event: 'scheduler_item_created', schedule_id: 'f1' });
+    ev35({ event: 'scheduler_item_created', schedule_id: 'n1' });
+    await tick(600);
+    r.ownDiscoveredOff = calls35.join() === 'switch.schedule_n1';
+    c35.remove();
 
     r.noErrors = errors.length === 0;
     const ok = Object.values(r).every(Boolean);

@@ -55,13 +55,13 @@ export function normalizeConfig(config) {
   const out = circuits.map((c, i) => {
     if (!c || typeof c.id !== 'string' || !c.id) fail(`circuits[${i}].id is required`);
     if (!Array.isArray(c.valves) || !c.valves.length) fail(`circuits[${i}].valves must be a non-empty list`);
-    for (const v of c.valves) {
-      if (typeof v !== 'string' || !v.startsWith('climate.')) fail(`circuits[${i}].valves: "${v}" is not a climate entity`);
-      valveCircuit[v] = c.id;
-    }
-    return { id: c.id, name: c.name || null, valves: [...c.valves] };
-  });
-  if (valve != null && !valveCircuit[valve]) fail(`valve "${valve}" is not in any circuit`);
+    for (const v of c.valves) if (typeof v !== 'string' || !v.startsWith('climate.')) fail(`circuits[${i}].valves: "${v}" is not a climate entity`);
+    // the first circuit listing a valve wins; later duplicates are dropped
+    const valves = [...new Set(c.valves)].filter((v) => !valveCircuit[v]);
+    valves.forEach((v) => { valveCircuit[v] = c.id; });
+    return { id: c.id, name: c.name || null, valves };
+  }).filter((c) => c.valves.length);
+  // `valve` may live in a circuit that is only discovered from the states: checked by the card once they are known
   const timeStep = config.time_step ?? 15;
   if (!(timeStep > 0) || 1440 % timeStep) fail('`time_step` must be a positive divisor of 1440');
   return { valve, circuits: out, timeStep, valveCircuit };
@@ -80,9 +80,8 @@ export function discoverCircuits(states, cfg) {
   return out;
 }
 
-/** `cfg` plus the discovered circuits. */
-export function withDiscovered(cfg, states) {
-  const found = discoverCircuits(states, cfg);
+/** `cfg` plus the circuits `discoverCircuits` found. */
+export function withDiscovered(cfg, found) {
   if (!found.length) return cfg;
   const valveCircuit = { ...cfg.valveCircuit };
   found.forEach((c) => c.valves.forEach((v) => { valveCircuit[v] = c.id; }));
@@ -184,7 +183,7 @@ export function effective(schedules, valve, program, day) {
 const slotsOf = (list) => list.flatMap((s) => s.slots.map((x) => ({ ...x, schedule: s }))).sort((a, b) => a.start - b.start);
 
 /**
- * The slot a valve follows at `date` -> {temp, start, end, fromYesterday, next: {start, temp, tomorrow, days} | null}.
+ * The slot a valve follows at `date` -> {temp, start, end, fromYesterday, boundary, next: {start, temp, days} | null}.
  * Latest start <= now today, else the last slot of yesterday's schedules (the evening slot holds past midnight),
  * else today's own last slot (as heating does). `start` / `end` are minutes of the day the slot belongs to.
  */
@@ -200,16 +199,19 @@ export function slotAt(schedules, valve, program, date) {
   const cur = today.filter((s) => s.start <= now).pop();
   const pick = cur || yesterday[yesterday.length - 1] || today[today.length - 1];
   if (!pick) return null;
-  // next = the next slot with another temperature (up to 7 days ahead); same-temperature slots are no change
-  let nxt = null, days = 0;
+  // boundary = the next slot start (heating re-applies the target there); next = the next slot with another temperature
+  let boundary = null, nxt = null;
   for (let k = 0; k <= 7 && !nxt; k++) {
-    nxt = (k ? day(k) : today.filter((s) => s.start > now)).find((s) => s.temp !== pick.temp) || null;
-    days = k;
+    for (const x of k ? day(k) : today.filter((y) => y.start > now)) {
+      const m = { start: x.start, temp: x.temp, days: k };
+      boundary = boundary || m;
+      if (x.temp !== pick.temp) { nxt = m; break; }
+    }
   }
   return {
     temp: pick.temp, start: pick.start, end: pick.end, fromYesterday: !cur && yesterday.includes(pick),
     schedule: pick.schedule, isFallback: pick.isFallback,
-    next: nxt ? { start: nxt.start, temp: nxt.temp, tomorrow: days === 1, days } : null,
+    boundary, next: nxt,
   };
 }
 
@@ -429,7 +431,11 @@ export function nowState({ states = {}, circuit, valve, schedules, program, now 
   const slot = slotAt(schedules, valve, program, now);
   const sched = slot?.temp ?? attrOf(states, `sensor.heating_schedule_${circuit}`, 'targets')?.[valve] ?? null;
   const schedTxt = sched == null ? null : `${fmtTemp(sched)} °C`;
-  const when = (n) => (n.days > 1 ? `${DAY_LABELS[dow(new Date(now.getFullYear(), now.getMonth(), now.getDate() + n.days))]} ` : n.days ? 'zítra ' : '');
+  const when = (n) => {
+    if (n.days < 2) return n.days ? 'zítra ' : '';
+    const d = DAY_LABELS[dow(new Date(now.getFullYear(), now.getMonth(), now.getDate() + n.days))];
+    return n.days === 7 ? `příští ${d} ` : `${d} `;
+  };
   const at = (n) => `${when(n)}v ${fmtTime(n.start)}`;
   const tile = (kind, icon, text, sub, temp, extra = {}) => ({ kind, icon, text, sub, temp, unit: temp === DASH ? '' : '°C', tone: null, muted: false, btn: '', ...extra });
   const wouldBe = schedTxt ? ` · teď by bylo ${schedTxt}` : '';
@@ -461,7 +467,7 @@ export function nowState({ states = {}, circuit, valve, schedules, program, now 
   const target = Number(attrOf(states, valve, 'temperature'));
   const planned = attrOf(states, `sensor.heating_schedule_${circuit}`, 'targets')?.[valve];
   if (planned != null && Number.isFinite(target) && attrOf(states, valve, 'temperature') != null && Math.abs(target - planned) > 0.05) {
-    const n = slot?.next;
+    const n = slot?.boundary; // heating re-applies the schedule at every slot start, whatever its temperature
     return tile('manual', 'pencil', `Ručně ${fmtTemp(target)} °C`,
       n ? `Rozvrh to ${at(n)} vrátí na ${fmtTemp(n.temp)} °C` : `Podle rozvrhu by bylo ${fmtTemp(planned)} °C`,
       fmtTemp(target), { tone: target, btn: 'Podle rozvrhu' });
@@ -477,6 +483,7 @@ export function nowState({ states = {}, circuit, valve, schedules, program, now 
 }
 
 const slotKey = (slots) => JSON.stringify(slots.map((x) => [x.start, x.temp]));
+const ownKey = (m) => `${m.valve}|${m.program}|${m.days.join()}|${slotKey(m.slots)}`;
 /** The parts the editor writes (program, weekdays, slots) are equal. */
 const sameContent = (a, b) => a.program === b.program && a.days.join() === b.days.join() && slotKey(a.slots) === slotKey(b.slots);
 
@@ -667,6 +674,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     super();
     this.attachShadow({ mode: 'open' });
     this._schedules = [];
+    this._own = []; // content keys of the schedules this instance added and has not seen turned off yet
     this._created = new Map(); // id -> loads that did not list it yet; schedules just created: their switch is turned off once it exists
     this._turning = new Set(); // ids with a turn_off in flight
     this._busy = new Set(); // ids of schedules being written (pause toggle), `copy` while the fallback copy runs
@@ -683,9 +691,10 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
 
   setConfig(config) {
     this._base = this._cfg = normalizeConfig(config);
-    this._dkey = '[]';
+    this._found = []; this._refs = null;
+    this._valve = this._base.valve || this._base.circuits[0].valves[0];
+    this._valvePending = !!this._base.valve && !this._base.valveCircuit[this._base.valve]; // maybe a discovered valve
     if (this._hass) this._discover();
-    this._valve = this._cfg.valve || this._cfg.circuits[0].valves[0];
     this._prog = null;
     this._progPicked = false; // until a chip is picked the card shows the running program
     this._view = 'week';
@@ -696,20 +705,41 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
 
   set hass(hass) {
     this._hass = hass;
+    if (!this._cfg) return; // hass before setConfig
     this._discover();
     this._start();
     // re-render only when what the card reads from the states changed
-    const sig = this._signature();
-    if (sig !== this._sig) this._render();
+    if (this._cfg !== this._renderedCfg || this._signature() !== this._sig) this._render();
   }
 
-  /** Base config + the circuits found in the states; rebuilt only when the found circuits or their valves change. */
+  /**
+   * Base config + the circuits found in the states. Skipped while the `sensor.heating_schedule_*` state objects are the
+   * ones of the last scan (same entity count); `_cfg` changes identity only when the found circuits or valves change.
+   */
   _discover() {
-    const found = discoverCircuits(this._hass.states, this._base);
-    const key = JSON.stringify(found);
-    if (key === this._dkey) return;
-    this._dkey = key;
-    this._cfg = withDiscovered(this._base, this._hass.states);
+    if (!this._base) return;
+    const st = this._hass.states ?? {}, ids = Object.keys(st);
+    if (this._refs && ids.length === this._n && this._refs.every(([id, o]) => st[id] === o)) return;
+    this._n = ids.length;
+    this._refs = ids.filter((id) => id.startsWith('sensor.heating_schedule_')).map((id) => [id, st[id]]);
+    const found = discoverCircuits(st, this._base);
+    const same = found.length === this._found.length && found.every((c, i) => c.id === this._found[i].id && c.valves.join() === this._found[i].valves.join());
+    if (same) return;
+    this._found = found;
+    this._cfg = withDiscovered(this._base, found);
+    this._fixValve();
+  }
+
+  /** The shown valve is gone (its circuit vanished) or the configured `valve` has just been discovered. */
+  _fixValve() {
+    const vc = this._cfg.valveCircuit, want = this._base.valve;
+    let v = this._valve;
+    if (this._valvePending && vc[want]) { v = want; this._valvePending = false; }
+    if (!vc[v]) v = vc[want] ? want : this._cfg.circuits[0]?.valves[0] ?? null;
+    if (v === this._valve) return;
+    this._valve = v;
+    this._prog = null; this._progPicked = false;
+    this._view = 'week'; this._ed = this._pick = this._copy = null;
   }
 
   connectedCallback() { this._start(); }
@@ -768,14 +798,16 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
 
   /** scheduler-component creates every schedule on; this card keeps its own off (heating alone fires the valves). */
   _turnOff() {
-    const mine = new Set(this._cfg.circuits.flatMap((c) => c.valves));
+    const mine = new Set(this._base.circuits.flatMap((c) => c.valves)); // configured valves; discovered ones only for own adds
     for (const id of [...this._created.keys()]) {
       const s = this._schedules.find((x) => x.id === id);
       if (!s) { // not listed yet: retried on the next load, dropped after a few (rolled back or removed elsewhere)
         if (this._created.get(id) >= 3) this._created.delete(id); else this._created.set(id, this._created.get(id) + 1);
         continue;
       }
-      if (!s.valves.some((v) => mine.has(v))) { this._created.delete(id); continue; } // not ours: never touched
+      const k = ownKey(s), own = this._own.indexOf(k);
+      if (!s.valves.some((v) => mine.has(v)) && own < 0) { this._created.delete(id); continue; } // not ours: never touched
+      if (own >= 0) this._own.splice(own, 1);
       if (!this._hass.states?.[s.switch] || this._turning.has(id)) continue; // switch entity not there yet
       this._turning.add(id);
       Promise.resolve(this._hass.callService('switch', 'turn_off', { entity_id: s.switch }))
@@ -815,8 +847,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
   /** Everything the week view reads from the states; a change of any of it re-renders. */
   _signature() {
     const st = this._hass?.states ?? {};
-    const c = this._circuit();
-    const id = c.id, v = this._valve;
+    const id = this._circuit()?.id, v = this._valve;
     const a = (e, k) => st[e]?.attributes?.[k];
     const s = (e) => st[e]?.state;
     return JSON.stringify([
@@ -828,7 +859,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
       a(`sensor.heating_off_schedule_${id}`, 'window_open_climates'),
       a(`sensor.heating_valves_${id}`, 'phases')?.[v]?.[0], a(`sensor.heating_valves_${id}`, 'forced'), a(`sensor.heating_valves_${id}`, 'closed'),
       s(`sensor.heating_applying_${id}`), a(`sensor.heating_applying_${id}`, 'left'),
-      a(`sensor.heating_schedule_${id}`, 'targets'), this._dkey,
+      a(`sensor.heating_schedule_${id}`, 'targets'),
     ]);
   }
 
@@ -965,14 +996,14 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
         if (!cur || !cur.editable) throw new Error('Rozvrh už neexistuje nebo ho nelze upravovat');
         if (!sameContent(cur, ed.existing)) { ed.stale = true; return; } // changed elsewhere: ask instead of overwriting
         // days, slots and program come from the editor; paused, name, foreign tags and dates from the stored version
-        await saveSchedule(this._hass, { id: cur.id, valve: cur.valve, program: ed.program, days: ed.days, slots: ed.slots, paused: cur.paused }, cur);
+        await this._save({ id: cur.id, valve: cur.valve, program: ed.program, days: ed.days, slots: ed.slots, paused: cur.paused }, cur);
       } else {
         if (ed.valves.some((v) => daysConflict(fresh, v, ed.program, ed.days).length)) throw new Error('Některý z dnů už má jiný rozvrh');
         const before = new Set(fresh.map((x) => x.id));
         const days = DAYS.filter((d) => ed.days.includes(d));
         const expected = ed.valves.map((valve) => ({ valve, program: ed.program, days, slots: ed.slots }));
         try {
-          for (const e of expected) await saveSchedule(this._hass, { ...e, paused: false });
+          for (const e of expected) await this._save({ ...e, paused: false });
         } catch (err) { await this._rollback(before, expected); throw err; }
       }
       if (this._ed === ed) this._leave(); // another editor may be open by now
@@ -1000,6 +1031,16 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
         await removeSchedule(this._hass, c.id);
       }
     } catch { /* the original error is the one to show */ }
+  }
+
+  /** `saveSchedule`; an add is remembered by content so its schedule is recognised as this card's own. */
+  async _save(model, existing = null) {
+    const k = !(model.id ?? existing?.id) ? ownKey(model) : null;
+    if (k) this._own.push(k);
+    try { return await saveSchedule(this._hass, model, existing); } catch (e) {
+      if (k) this._own.splice(this._own.indexOf(k), 1);
+      throw e;
+    }
   }
 
   /** Shows a failed write / service call until the next successful write or for 10 s. */
@@ -1030,7 +1071,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
   _pause(id, paused) {
     const s = this._schedules.find((x) => x.id === id);
     if (!s || !s.editable || this._busy.has(id)) { this._render(true); return; } // put the checkbox back to the stored state
-    return this._write(id, () => saveSchedule(this._hass, { ...s, paused }, s));
+    return this._write(id, () => this._save({ ...s, paused }, s));
   }
 
   /** A program without schedules gets copies of the valve's Výchozí schedules, tagged with the program. All or nothing. */
@@ -1043,7 +1084,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
       const before = new Set((await loadSchedules(this._hass)).map((x) => x.id));
       const expected = src.map((s) => ({ valve: s.valve, program: prog, days: s.days, slots: s.slots }));
       try {
-        for (const s of src) await saveSchedule(this._hass, { ...s, id: undefined, program: prog, paused: false });
+        for (const s of src) await this._save({ ...s, id: undefined, program: prog, paused: false });
       } catch (err) { await this._rollback(before, expected); throw err; } // roll back the copies already added, report the original error
     });
   }
@@ -1138,16 +1179,16 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
         this._render(true);
         const adds = plan.add.filter((m) => m.valve === v), trimmed = [], removed = [];
         try {
-          for (const m of adds) await saveSchedule(this._hass, m);
-          for (const m of plan.edit.filter((x) => x.valve === v)) { await saveSchedule(this._hass, m, stored(m.id)); trimmed.push(stored(m.id)); }
+          for (const m of adds) await this._save(m);
+          for (const m of plan.edit.filter((x) => x.valve === v)) { await this._save(m, stored(m.id)); trimmed.push(stored(m.id)); }
           for (const id of plan.remove.filter((x) => stored(x)?.valve === v)) { await removeSchedule(this._hass, id); removed.push(stored(id)); }
         } catch (err) {
           failed = true;
           c.errors[v] = err?.message || String(err);
           await this._rollback(before, adds); // before the re-adds below: those may look like the copies
           try {
-            for (const old of trimmed) await saveSchedule(this._hass, old, old);
-            for (const old of removed) await saveSchedule(this._hass, { ...old, id: undefined }, { raw: old.raw });
+            for (const old of trimmed) await this._save(old, old);
+            for (const old of removed) await this._save({ ...old, id: undefined }, { raw: old.raw });
           } catch { /* the original error is the one to show */ }
         }
       }
@@ -1247,11 +1288,19 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
   _render(force = false) {
     if (!this._cfg) return;
     this._sig = this._signature();
+    this._renderedCfg = this._cfg;
     const hass = this._hass, now = new Date();
     const circuit = this._circuit();
     const dark = !!hass?.themes?.darkMode;
     const states = hass?.states ?? {};
     const valve = this._valve;
+    // no valve to show, or the configured `valve` is in no circuit (configured or discovered) once the states are known
+    const bad = !circuit ? 'Žádná hlavice' : hass && this._base.valve && !this._cfg.valveCircuit[this._base.valve] ? `heating-schedule-card: valve "${this._base.valve}" is not in any circuit` : null;
+    if (bad) {
+      const html = `<style>${STYLE}</style><ha-card><div class="card${dark ? ' dark' : ''}"><div class="err">${esc(bad)}</div></div></ha-card>`;
+      if (html !== this._html) { this.shadowRoot.innerHTML = html; this._html = html; }
+      return;
+    }
     const { running, list } = this._programs();
     if (!this._progPicked || !list.some((p) => p.id === this._prog)) { this._prog = running; this._progPicked = false; }
     const prog = this._prog, progName = list.find((p) => p.id === prog).name;
