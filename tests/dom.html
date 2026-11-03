@@ -345,6 +345,117 @@
       && !!s13.querySelector('.rows');
     c13.remove();
 
+    // --- editor review fixes ---
+    // a schedule with a 06:00 first start keeps it: carry-over part shown muted, not selectable, starts written back
+    const late = { ...weekdays, timeslots: [{ ...weekdays.timeslots[0], start: '06:00', stop: '20:00' }, { ...weekdays.timeslots[0], start: '20:00', stop: '23:59', actions: [{ ...weekdays.timeslots[0].actions[0], service_data: { temperature: 19 } }] }] };
+    items = [late];
+    calls = [];
+    const c14 = await mkCard(mkHass({ callApi: async (m, path, body) => { calls.push({ path, body }); } }), withValve);
+    click(c14, '.row [data-a="open"]');
+    const s14 = c14.shadowRoot;
+    r.carry = !!s14.querySelector('.edseg.carry') && !s14.querySelector('.edseg.carry[data-a]') && s14.querySelectorAll('button.edseg').length === 2
+      && s14.querySelector('.edseg.carry').textContent === 'z předchozího dne';
+    click(c14, '[data-a="day"][data-k="sat"]');
+    click(c14, '[data-a="save"]');
+    await tick(150);
+    r.keepsStart = calls.length === 1 && calls[0].body.timeslots.map((t) => t.start).join() === '06:00:00,20:00:00' && calls[0].body.timeslots[1].stop === '23:59:00';
+
+    // stored version changed since the editor opened: no overwrite, "Načíst znovu" reloads it; paused / name come from the stored one
+    items = [weekdays];
+    calls = [];
+    const c15 = await mkCard(mkHass({ callApi: async (m, path, body) => { calls.push({ path, body }); } }), withValve);
+    const s15 = c15.shadowRoot;
+    click(c15, '.row [data-a="open"]');
+    items = [{ ...weekdays, tags: [...weekdays.tags, 'paused'], name: 'renamed' }]; // only paused / name: written with the stored ones
+    click(c15, '[data-a="day"][data-k="sat"]');
+    click(c15, '[data-a="save"]');
+    await tick(150);
+    r.keepsStored = calls.length === 1 && calls[0].body.tags.includes('paused') && calls[0].body.name === 'renamed' && calls[0].body.weekdays.join() === 'mon,tue,wed,thu,fri,sat';
+    calls = [];
+    items = [weekdays];
+    await c15._load();
+    click(c15, '.row [data-a="open"]');
+    items = [{ ...weekdays, timeslots: [{ ...weekdays.timeslots[0], actions: [{ ...weekdays.timeslots[0].actions[0], service_data: { temperature: 17 } }] }] }];
+    click(c15, '[data-a="save"]');
+    await tick(150);
+    r.stale = calls.length === 0 && s15.textContent.includes('Rozvrh se mezitím změnil') && !btnOn(c15, '[data-a="save"]');
+    click(c15, '[data-a="reload"]');
+    r.reloadStale = !!s15.querySelector('.edbar') && !s15.querySelector('.stale') && s15.querySelector('.dial b').textContent.startsWith('17') && btnOn(c15, '[data-a="save"]');
+    // delete confirmation names the stored days
+    click(c15, '[data-a="day"][data-k="mon"]');
+    click(c15, '[data-a="del"]');
+    r.delDays = s15.querySelector('.confirm span').textContent === 'Smazat rozvrh Po–Pá?';
+    c15.remove();
+
+    // a save in flight disables Zpět / Zrušit, and its completion does not close another editor
+    let release;
+    items = [weekdays];
+    const c16 = await mkCard(mkHass({ callApi: () => new Promise((res) => { release = res; }) }), withValve);
+    const s16 = c16.shadowRoot;
+    click(c16, '.row [data-a="open"]');
+    click(c16, '[data-a="save"]');
+    await tick(100);
+    r.busyBack = !btnOn(c16, '[data-a="back"][data-k=""]') && !btnOn(c16, '[data-a="back"][data-k="c"]');
+    const other = c16._ed;
+    c16._ed = { ...other };
+    release();
+    await tick(150);
+    r.noStaleLeave = c16._view === 'editor' && c16._ed !== null;
+    c16.remove();
+
+    // a reload that brings a conflict updates Uložit while a control has the focus
+    items = [weekdays];
+    const c17 = await mkCard(mkHass(), withValve);
+    const s17 = c17.shadowRoot;
+    click(c17, '[data-a="add"]'); // Sat and Sun are free
+    const tg = s17.querySelector('[data-a="day"][data-k="sat"]');
+    tg.focus();
+    items = [weekdays, { ...weekdays, schedule_id: 'sat1', entity_id: 'switch.schedule_sat1', weekdays: ['sat'] }];
+    await c17._load();
+    r.liveConflict = s17.activeElement === tg && !btnOn(c17, '[data-a="save"]') && s17.querySelector('.why').textContent === 'So už má jiný rozvrh';
+    c17.remove();
+
+    // created ids that never show up are dropped after a few loads
+    const c18 = await mkCard(mkHass());
+    c18._created.set('ghost', 0);
+    for (let n = 0; n < 5; n++) await c18._load();
+    r.createdPruned = !c18._created.has('ghost');
+    c18.remove();
+
+    // picker: programs = intersection, dedup of a valve in two circuits, rollback removes only its own
+    const st2 = { ...bed, 'sensor.heating_program_c2': { state: 'auto', attributes: { programs: ['auto', 'other'], program_names: { auto: 'Výchozí', other: 'Jiný' } } }, 'climate.far_valve': { state: 'heat', attributes: { friendly_name: 'Daleko' } } };
+    const cfg2 = { circuits: [{ id: CID, valves: ['climate.kitchen_valve', 'climate.bedroom_valve'] }, { id: 'c2', valves: ['climate.far_valve', 'climate.bedroom_valve'] }] };
+    store = []; adds = 0; removed.length = 0;
+    const c19 = await mkCard(mkHass({
+      states: st2, callWS: async () => store,
+      callApi: async (m, path, body) => {
+        if (path === 'scheduler/add') {
+          adds++;
+          if (adds === 2) throw new Error('second failed');
+          store = [...store, { ...weekdays, schedule_id: 'mine1', entity_id: 'switch.schedule_mine1', weekdays: body.weekdays, tags: body.tags, timeslots: body.timeslots },
+            { ...weekdays, schedule_id: 'foreign1', entity_id: 'switch.schedule_foreign1', weekdays: ['tue'], tags: ['program:auto'] }]; // someone else adds one meanwhile
+        } else if (path === 'scheduler/remove') { removed.push(body.schedule_id); store = store.filter((x) => x.schedule_id !== body.schedule_id); }
+      },
+    }), cfg2);
+    const s19 = c19.shadowRoot;
+    click(c19, '[data-a="add"]');
+    r.dedup = s19.querySelectorAll('.tile[data-a="pv"]').length === 3;
+    const optIds = () => [...s19.querySelectorAll('select[data-a="pickprog"] option')].map((o) => o.value).join();
+    r.pickerProgs1 = optIds() === 'auto,odd,vacation';
+    s19.querySelector('select[data-a="pickprog"]').value = 'odd';
+    s19.querySelector('select[data-a="pickprog"]').dispatchEvent(new Event('change', { bubbles: true }));
+    click(c19, '[data-a="pv"][data-k="climate.bedroom_valve"]'); // in both circuits: only the common programs
+    r.pickerProgs2 = optIds() === 'auto' && c19._pick.program === 'auto';
+    click(c19, '[data-a="pv"][data-k="climate.far_valve"]');
+    click(c19, '[data-a="go"]');
+    r.batchDedup = c19._ed.valves.join() === 'climate.kitchen_valve,climate.bedroom_valve,climate.far_valve';
+    r.batchOnce = new Set(c19._ed.valves).size === c19._ed.valves.length;
+    click(c19, '[data-a="save"]');
+    await tick(300);
+    r.ownRollback = adds === 2 && removed.join() === 'mine1' && store.some((x) => x.schedule_id === 'foreign1');
+    c19.remove();
+
+
     r.noErrors = errors.length === 0;
     const ok = Object.values(r).every(Boolean);
     document.getElementById('out').textContent = 'RESULT ' + (ok ? 'PASS ' : 'FAIL ') + JSON.stringify(r) + (errors.length ? ' ERRORS ' + JSON.stringify(errors) : '');

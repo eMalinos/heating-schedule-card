@@ -382,10 +382,19 @@ const S3 = [{ start: 0, end: 360, temp: 18 }, { start: 360, end: 1200, temp: 21 
 const cover = (s) => s[0].start === 0 && s.at(-1).end === 1440 && s.every((x, i) => x.start < x.end && (i === 0 || x.start === s[i - 1].end));
 const se = (s) => s.map((x) => [x.start, x.end]);
 
-test('normalizeSlots: a late first slot gets a leading slot with the last temperature', () => {
-  assert.deepEqual(normalizeSlots([{ start: 360, end: 1200, temp: 21 }, { start: 1200, end: 1440, temp: 19 }]).slice(0, 2),
-    [{ start: 0, end: 360, temp: 19 }, { start: 360, end: 1200, temp: 21 }]);
-  assert.deepEqual(normalizeSlots(S3), S3);
+test('normalizeSlots keeps a late first start; removing / moving the first slot respects it', () => {
+  const late = [{ start: 360, end: 1200, temp: 21 }, { start: 1200, end: 1440, temp: 19 }];
+  assert.deepEqual(normalizeSlots(late), late);
+  assert.notEqual(normalizeSlots(late)[0], late[0]);
+  assert.deepEqual(removeSlot(late, 0), [{ start: 360, end: 1440, temp: 19 }]);
+  assert.deepEqual(se(moveBoundary(late, 0, -15)), [[345, 1200], [1200, 1440]]);
+  assert.deepEqual(se(moveBoundary(late, 0, -5000)), [[0, 1200], [1200, 1440]]);
+  assert.deepEqual(se(moveBoundary(late, 0, 5000)), [[1185, 1200], [1200, 1440]]);
+  assert.equal(moveBoundary(S3, 0, 15), S3); // starting at 00:00: fixed
+  // an untouched 06:00-first schedule writes its starts back
+  const ex = sched([['06:00:00', '20:00:00', 21], ['20:00:00', '00:00:00', 19]]);
+  const body = toPayload({ id: 'x1', valve: V, program: 'auto', days: ['mon', 'tue'], slots: normalizeSlots(ex.slots), paused: false }, ex);
+  assert.deepEqual(body.timeslots.map((t) => [t.start, t.stop]), [['06:00:00', '20:00:00'], ['20:00:00', '23:59:00']]);
 });
 
 test('splitSlot: halves at the nearest step, too short stays', () => {

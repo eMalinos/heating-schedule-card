@@ -215,12 +215,8 @@ export const removeSchedule = (hass, id) => hass.callApi('POST', 'scheduler/remo
 
 const snap = (m, step) => Math.round(m / step) * step;
 
-/** Copy of the slots covering 00:00-24:00: a first slot after 00:00 gets a leading slot with the last slot's temperature. */
-export function normalizeSlots(slots) {
-  const s = slots.map((x) => ({ ...x }));
-  if (s.length && s[0].start > 0) s.unshift({ start: 0, end: s[0].start, temp: s[s.length - 1].temp });
-  return s;
-}
+/** Copy of the slots for editing. A first slot after 00:00 stays as it is: the time before it is carried over from the previous day. */
+export const normalizeSlots = (slots) => slots.map((x) => ({ ...x }));
 
 /** Splits slot `i` in halves at the nearest `step`; both halves keep at least `step`. */
 export function splitSlot(slots, i, step = 15) {
@@ -233,12 +229,19 @@ export function splitSlot(slots, i, step = 15) {
 /** Removes slot `i`: the previous slot grows over it, the first one is taken over by the next. The last slot stays. */
 export function removeSlot(slots, i) {
   if (slots.length < 2 || !slots[i]) return slots;
-  if (i === 0) return [{ ...slots[1], start: 0 }, ...slots.slice(2)];
+  if (i === 0) return [{ ...slots[1], start: slots[0].start }, ...slots.slice(2)];
   return [...slots.slice(0, i - 1), { ...slots[i - 1], end: slots[i].end }, ...slots.slice(i + 1)];
 }
 
-/** Moves the boundary where slot `i` starts (= where `i - 1` ends) by `delta` minutes; both slots keep at least `step`. */
+/**
+ * Moves the boundary where slot `i` starts (= where `i - 1` ends) by `delta` minutes; both slots keep at least `step`.
+ * The first slot's start moves only when it is not 00:00 already (a schedule that carries the previous day over).
+ */
 export function moveBoundary(slots, i, delta, step = 15) {
+  if (i === 0 && slots[0]?.start > 0) {
+    const at = Math.min(slots[0].end - step, Math.max(0, slots[0].start + delta));
+    return at === slots[0].start ? slots : [{ ...slots[0], start: at }, ...slots.slice(1)];
+  }
   if (i < 1 || i >= slots.length) return slots;
   const a = slots[i - 1], b = slots[i];
   if (a.start + step > b.end - step) return slots;
@@ -350,6 +353,10 @@ export function nowState({ states = {}, circuit, valve, schedules, program, now 
     `Běží program ${names[program] || (program === 'auto' ? 'Výchozí' : program)}${slot.schedule ? ` · ${daysLabel(slot.schedule.days)}` : ''}`,
     fmtTemp(slot.temp), { tone: slot.temp });
 }
+
+const slotKey = (slots) => JSON.stringify(slots.map((x) => [x.start, x.temp]));
+/** The parts the editor writes (program, weekdays, slots) are equal. */
+const sameContent = (a, b) => a.program === b.program && a.days.join() === b.days.join() && slotKey(a.slots) === slotKey(b.slots);
 
 // ---------- element ----------
 
@@ -496,6 +503,10 @@ const STYLE = `
   .dial .knob2 { width: 22px; height: 22px; box-sizing: border-box; border-radius: 50%; box-shadow: 0 2px 6px rgba(0,0,0,.2); }
   .dial .lim { bottom: 2px; font-size: 11px; font-weight: 600; color: var(--c-text2); }
   .why { font-size: 13px; color: var(--c-warm); }
+  .why:empty { display: none; }
+  .edseg.carry { background: repeating-linear-gradient(135deg, var(--c-fill) 0 6px, color-mix(in srgb, var(--c-text2) 14%, var(--c-fill)) 6px 12px); color: var(--c-text2); font-size: 11px; font-weight: 600; box-shadow: none; cursor: default; }
+  .err.stale { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .err.stale span { flex: 1 1 160px; font-weight: 600; }
   .tile { position: relative; display: flex; align-items: center; gap: 10px; min-width: 0; min-height: 56px; padding: 10px 12px; border: 1px solid transparent; border-radius: 16px; background: var(--c-fill); box-shadow: var(--c-inset); text-align: left; }
   .tile[aria-pressed="true"] { border-color: color-mix(in srgb, var(--c-accent) 45%, var(--c-border)); background: var(--c-tint); box-shadow: var(--c-raised-shadow); }
   .tile .tic { width: 32px; height: 32px; flex: none; border-radius: 50%; display: grid; place-items: center; background: var(--c-card); color: var(--c-warm); }
@@ -524,7 +535,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     super();
     this.attachShadow({ mode: 'open' });
     this._schedules = [];
-    this._created = new Set(); // ids of schedules just created: their switch is turned off once it exists
+    this._created = new Map(); // id -> loads that did not list it yet; schedules just created: their switch is turned off once it exists
     this._turning = new Set(); // ids with a turn_off in flight
     this._busy = new Set(); // ids of schedules being written (pause toggle), `copy` while the fallback copy runs
     this._seq = 0;
@@ -584,7 +595,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
   _subscribe() {
     if (this._unsub || !this._hass.connection) return;
     const p = this._hass.connection.subscribeMessage((ev) => {
-      if (ev?.event === 'scheduler_item_created' && ev.schedule_id) this._created.add(ev.schedule_id);
+      if (ev?.event === 'scheduler_item_created' && ev.schedule_id) this._created.set(ev.schedule_id, 0);
       clearTimeout(this._timer);
       this._timer = setTimeout(() => this._load(), 300);
     }, { type: 'scheduler_updated' });
@@ -613,9 +624,12 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
   /** scheduler-component creates every schedule on; this card keeps its own off (heating alone fires the valves). */
   _turnOff() {
     const mine = new Set(this._cfg.circuits.flatMap((c) => c.valves));
-    for (const id of [...this._created]) {
+    for (const id of [...this._created.keys()]) {
       const s = this._schedules.find((x) => x.id === id);
-      if (!s) continue; // not listed yet: retried on the next load
+      if (!s) { // not listed yet: retried on the next load, dropped after a few (rolled back or removed elsewhere)
+        if (this._created.get(id) >= 3) this._created.delete(id); else this._created.set(id, this._created.get(id) + 1);
+        continue;
+      }
       if (!s.valves.some((v) => mine.has(v))) { this._created.delete(id); continue; } // not ours: never touched
       if (!this._hass.states?.[s.switch] || this._turning.has(id)) continue; // switch entity not there yet
       this._turning.add(id);
@@ -623,6 +637,16 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
         .then(() => this._created.delete(id), () => {}) // failed: stays queued for the next load
         .then(() => this._turning.delete(id));
     }
+  }
+
+  _allValves() { return [...new Set(this._cfg.circuits.flatMap((c) => c.valves))]; }
+
+  /** Programs every picked valve's circuit(s) have (a valve listed in two circuits needs both). */
+  _pickerPrograms() {
+    const valves = this._pick.valves.length ? this._pick.valves : [this._valve];
+    const cs = [...new Set(valves.flatMap((v) => this._cfg.circuits.filter((c) => c.valves.includes(v))))];
+    const lists = cs.map((c) => this._programs(c).list);
+    return lists[0].filter((p) => lists.every((l) => l.some((q) => q.id === p.id)));
   }
 
   _circuit() { return this._cfg.circuits.find((c) => c.id === this._cfg.valveCircuit[this._valve]); }
@@ -683,8 +707,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     if (schedule) {
       const s = this._schedules.find((x) => x.id === schedule.id);
       if (!s || !s.editable) return; // read-only or gone: never opened
-      this._ed = { existing: s, valves: [s.valve], program: s.program, days: [...s.days], slots: normalizeSlots(s.slots), paused: s.paused, sel: 0, confirm: false };
-      this._view = 'editor';
+      this._openExisting(s);
     } else if (this._cfg.valve) {
       this._newEditor([this._valve], prog);
     } else {
@@ -694,10 +717,15 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     this._render(true);
   }
 
+  _openExisting(s) {
+    this._ed = { existing: s, valves: [s.valve], program: s.program, days: [...s.days], slots: normalizeSlots(s.slots), sel: 0, confirm: false, stale: false };
+    this._view = 'editor';
+  }
+
   /** A new schedule: one slot 00:00-24:00 at 20 °C, the weekdays no schedule of these valves and the program uses yet. */
   _newEditor(valves, program) {
     const used = valves.flatMap((v) => daysConflict(this._schedules, v, program, DAYS));
-    this._ed = { existing: null, valves, program, days: DAYS.filter((d) => !used.includes(d)), slots: [{ start: 0, end: DAY_END, temp: 20 }], paused: false, sel: 0, confirm: false };
+    this._ed = { existing: null, valves, program, days: DAYS.filter((d) => !used.includes(d)), slots: [{ start: 0, end: DAY_END, temp: 20 }], sel: 0, confirm: false, stale: false };
     this._pick = null;
     this._view = 'editor';
   }
@@ -714,6 +742,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
   _editorAction({ a, k }) {
     const ed = this._ed, step = this._cfg.timeStep, i = Number(k);
     if (a === 'back') {
+      if (this._busy.has('ed')) return;
       if (this._view === 'editor' && ed?.fromPicker) { this._view = 'picker'; this._pick = { valves: ed.valves, program: ed.program }; }
       else { this._view = 'week'; this._pick = null; }
       this._ed = null;
@@ -722,11 +751,12 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     if (a === 'pv' && this._pick) {
       const v = this._pick.valves;
       this._pick.valves = v.includes(k) ? v.filter((x) => x !== k) : [...v, k];
+      if (!this._pickerPrograms().some((p) => p.id === this._pick.program)) this._pick.program = 'auto';
       return this._render(true);
     }
     if (a === 'go' && this._pick?.valves.length) {
       // keep the order of the circuits' valve lists
-      const all = this._cfg.circuits.flatMap((c) => c.valves);
+      const all = this._allValves();
       this._newEditor(all.filter((v) => this._pick.valves.includes(v)), this._pick.program);
       this._ed.fromPicker = true;
       return this._render(true);
@@ -740,6 +770,10 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     else if (a === 'rm') { ed.slots = removeSlot(ed.slots, ed.sel); ed.sel = Math.min(ed.sel > 0 ? ed.sel - 1 : 0, ed.slots.length - 1); }
     else if (a === 'tdn' || a === 'tup') ed.slots = setTemp(ed.slots, ed.sel, ed.slots[ed.sel].temp + (a === 'tdn' ? -0.5 : 0.5));
     else if (a === 'copy') { this.dispatchEvent(new CustomEvent('hsc-copy', { bubbles: true, composed: true, detail: { valve: ed.valves[0], program: ed.program, schedule: ed.existing } })); return; }
+    else if (a === 'reload') {
+      const fresh = this._schedules.find((x) => x.id === ed.existing?.id);
+      if (fresh?.editable) this._openExisting(fresh); else this._leave();
+    }
     else if (a === 'del') ed.confirm = true;
     else if (a === 'delno') ed.confirm = false;
     else if (a === 'delok') return this._deleteEditor();
@@ -751,30 +785,48 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
 
   _saveEditor() {
     const ed = this._ed;
-    if (!ed || this._busy.has('ed') || this._saveBlock(ed)) return;
-    const base = { program: ed.program, days: ed.days, slots: ed.slots, paused: ed.paused };
+    if (!ed || this._busy.has('ed') || ed.stale || this._saveBlock(ed)) return;
     return this._write('ed', async () => {
-      if (ed.existing) await saveSchedule(this._hass, { ...base, id: ed.existing.id, valve: ed.valves[0] }, ed.existing);
-      else {
-        const before = new Set(this._schedules.map((s) => s.id));
+      const fresh = await loadSchedules(this._hass); // the stored state right now, not the list from a while ago
+      if (ed.existing) {
+        const cur = fresh.find((x) => x.id === ed.existing.id);
+        if (!cur || !cur.editable) throw new Error('Rozvrh už neexistuje nebo ho nelze upravovat');
+        if (!sameContent(cur, ed.existing)) { ed.stale = true; return; } // changed elsewhere: ask instead of overwriting
+        // days, slots and program come from the editor; paused, name, foreign tags and dates from the stored version
+        await saveSchedule(this._hass, { id: cur.id, valve: cur.valve, program: ed.program, days: ed.days, slots: ed.slots, paused: cur.paused }, cur);
+      } else {
+        if (ed.valves.some((v) => daysConflict(fresh, v, ed.program, ed.days).length)) throw new Error('Některý z dnů už má jiný rozvrh');
+        const before = new Set(fresh.map((x) => x.id));
+        const days = DAYS.filter((d) => ed.days.includes(d));
+        const expected = ed.valves.map((valve) => ({ valve, program: ed.program, days, slots: ed.slots }));
         try {
-          for (const valve of ed.valves) await saveSchedule(this._hass, { ...base, valve });
-        } catch (err) { await this._rollback(before, ed.program, ed.valves); throw err; }
+          for (const e of expected) await saveSchedule(this._hass, { ...e, paused: false });
+        } catch (err) { await this._rollback(before, expected); throw err; }
       }
-      this._leave();
+      if (this._ed === ed) this._leave(); // another editor may be open by now
     });
   }
 
   _deleteEditor() {
     const ed = this._ed;
     if (!ed?.existing || this._busy.has('ed')) return;
-    return this._write('ed', async () => { await removeSchedule(this._hass, ed.existing.id); this._leave(); });
+    return this._write('ed', async () => { await removeSchedule(this._hass, ed.existing.id); if (this._ed === ed) this._leave(); });
   }
 
-  /** Removes the schedules a failed multi-step write already added (new ones of these valves and this program). */
-  async _rollback(before, program, valves) {
+  /**
+   * Removes what a failed multi-step write already added: of the schedules not listed before it, only those whose valve,
+   * program, weekdays and slots equal one of the `expected` payloads (each matches at most once).
+   */
+  async _rollback(before, expected) {
     try {
-      for (const c of (await loadSchedules(this._hass)).filter((x) => !before.has(x.id) && x.program === program && x.valves.some((v) => valves.includes(v)))) await removeSchedule(this._hass, c.id);
+      const left = [...expected];
+      for (const c of (await loadSchedules(this._hass)).filter((x) => !before.has(x.id))) {
+        const k = left.findIndex((e) => e.valve === c.valve && e.program === c.program && c.days.join() === e.days.join() && slotKey(c.slots) === slotKey(e.slots));
+        if (k < 0) continue;
+        left.splice(k, 1);
+        this._created.delete(c.id);
+        await removeSchedule(this._hass, c.id);
+      }
     } catch { /* the original error is the one to show */ }
   }
 
@@ -815,18 +867,19 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     const groups = groupByProgram(this._schedules, valve);
     const src = (groups.get('auto') || []).filter((s) => !s.paused && s.editable);
     if (this._busy.has('copy') || !src.length || !isFallbackProgram(groups, prog)) return;
-    const before = new Set(this._schedules.map((s) => s.id));
     return this._write('copy', async () => {
+      const before = new Set((await loadSchedules(this._hass)).map((x) => x.id));
+      const expected = src.map((s) => ({ valve: s.valve, program: prog, days: s.days, slots: s.slots }));
       try {
         for (const s of src) await saveSchedule(this._hass, { ...s, id: undefined, program: prog, paused: false });
-      } catch (err) { await this._rollback(before, prog, [valve]); throw err; } // roll back the copies already added, report the original error
+      } catch (err) { await this._rollback(before, expected); throw err; } // roll back the copies already added, report the original error
     });
   }
 
   // ---------- render ----------
 
-  _programs() {
-    const c = this._circuit(), st = this._hass?.states ?? {};
+  _programs(c = this._circuit()) {
+    const st = this._hass?.states ?? {};
     const p = st[`sensor.heating_program_${c.id}`];
     const running = p?.state && p.state !== 'unknown' && p.state !== 'unavailable' ? p.state : 'auto';
     const ids = p?.attributes?.programs?.length ? [...p.attributes.programs] : ['auto'];
@@ -894,11 +947,14 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
 
     const err = this._subError || this._writeError || this._loadError;
     const errHtml = err ? `<div class="err">Chyba: ${esc(err)}</div>` : '';
-    const wrap = (inner, tone) => `<style>${STYLE}</style><ha-card><div class="card${dark ? ' dark' : ''}" style="--tone:${tone || 'transparent'}">${inner}</div></ha-card>`;
+    const wrap = (inner, tone, cls = '') => `<style>${STYLE}</style><ha-card><div class="card${dark ? ' dark' : ''}${cls}" style="--tone:${tone || 'transparent'}">${inner}</div></ha-card>`;
     let html;
     if (this._view === 'editor' && this._ed) html = wrap(this._editorHtml(dark, errHtml), tempColor(this._ed.slots[this._ed.sel].temp, dark));
-    else if (this._view === 'picker' && this._pick) html = wrap(this._pickerHtml(list, errHtml), null);
-    else html = `<style>${STYLE}</style><ha-card><div class="card${dark ? ' dark' : ''}${ns.muted ? ' muted-bars' : ''}" style="--tone:${toneCss || 'transparent'}">
+    else if (this._view === 'picker' && this._pick) {
+      const plist = this._pickerPrograms();
+      if (!plist.some((p) => p.id === this._pick.program)) this._pick.program = 'auto';
+      html = wrap(this._pickerHtml(plist, errHtml), null);
+    } else html = wrap(`
       <div class="head"><div class="t"><span class="sec">${esc(circuitName(hass, circuit))}</span><b>${esc(title)}</b></div>${picker}</div>
       ${errHtml}
       <div class="now${ns.muted || ns.tone == null ? ' muted' : ''}" data-kind="${ns.kind}">
@@ -910,16 +966,30 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
       <div class="progs"><span class="label">Program</span><div class="chips">${list.map((p) =>
         `<button type="button" class="chip" data-a="prog" data-id="${esc(p.id)}" aria-pressed="${p.id === prog}">${p.id === running ? '<span class="dot" title="Běží"></span>' : ''}${esc(p.name)}</button>`).join('')}</div></div>
       ${main}
-    </div></ha-card>`;
+    `, toneCss, ns.muted ? ' muted-bars' : '');
     if (html === this._html) { this._dirty = false; return; }
     // an automatic render never rebuilds the DOM under the user's hands (focused control, open select)
-    if (!force && this.shadowRoot.activeElement) { this._dirty = true; return; }
+    if (!force && this.shadowRoot.activeElement) {
+      this._dirty = true;
+      if (this._view === 'editor' && this._ed) this._patchSave(); // the save button must not lag behind a reload
+      return;
+    }
     this._dirty = false;
     this._html = html;
     // a pressed editor control keeps the focus through the rebuild (keyboard and screen reader users)
     const f = this.shadowRoot.activeElement?.dataset;
     this.shadowRoot.innerHTML = html;
     if (f?.a && f.k != null) [...this.shadowRoot.querySelectorAll('[data-a][data-k]')].find((x) => x.dataset.a === f.a && x.dataset.k === f.k)?.focus();
+  }
+
+  /** Updates Uložit and its reason in place (a rebuild would drop the focus). */
+  _patchSave() {
+    const ed = this._ed, root = this.shadowRoot;
+    const btn = root.querySelector('[data-a="save"]'), why = root.querySelector('.why');
+    if (!btn || !why) return;
+    const block = this._saveBlock(ed);
+    btn.disabled = !!(block || ed.stale || this._busy.has('ed'));
+    why.textContent = block;
   }
 
   _editorHtml(dark, errHtml) {
@@ -932,26 +1002,28 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     const btn = (a, label, svg, dis = false) => `<button type="button" class="step" data-a="${a}" data-k="" aria-label="${label}" ${dis ? 'disabled' : ''}>${svg}</button>`;
     const stepTile = (label, value, dn, up, canMove) => `<div class="ttile"><div><span class="sec">${label}</span><b>${fmtTime(value)}</b></div>
       <div class="pair">${btn(dn, `${label} o ${step} minut dřív`, icon('minus', 18), !canMove)}${btn(up, `${label} o ${step} minut později`, icon('plus', 18), !canMove)}</div></div>`;
-    const segs = sl.map((x, n) => `<button type="button" class="edseg" data-a="sel" data-k="${n}" style="flex:${x.end - x.start} 1 0;--c:${tempColor(x.temp, dark)}" aria-pressed="${n === ed.sel}"
+    const carry = sl[0].start > 0 ? `<span class="edseg carry" style="flex:${sl[0].start} 1 0" aria-label="Od půlnoci do ${fmtTime(sl[0].start)} platí rozvrh z předchozího dne">${sl[0].start >= 150 ? 'z předchozího dne' : ''}</span>` : '';
+    const segs = carry + sl.map((x, n) => `<button type="button" class="edseg" data-a="sel" data-k="${n}" style="flex:${x.end - x.start} 1 0;--c:${tempColor(x.temp, dark)}" aria-pressed="${n === ed.sel}"
       aria-label="Úsek ${fmtTime(x.start)}–${fmtTime(x.end)}, ${fmtTemp(x.temp)} °C">${x.end - x.start >= 90 ? `${fmtTemp(x.temp)}°` : ''}</button>`).join('');
     const pos = (m) => `calc(5px + (100% - 10px) * ${(m / DAY_END).toFixed(4)})`;
-    const handles = sl.slice(1).map((x) => `<span class="handle" style="left:${pos(x.start)}"></span>`).join('');
-    const hlabels = sl.slice(1).map((x) => `<span style="left:${pos(x.start)}">${Math.floor(x.start / 60)}:${pad(x.start % 60)}</span>`).join('');
+    const handles = sl.filter((x) => x.start > 0).map((x) => `<span class="handle" style="left:${pos(x.start)}"></span>`).join('');
+    const hlabels = sl.filter((x) => x.start > 0).map((x) => `<span style="left:${pos(x.start)}">${Math.floor(x.start / 60)}:${pad(x.start % 60)}</span>`).join('');
     const daysHtml = DAYS.map((d) => `<button type="button" class="day" data-a="day" data-k="${d}" aria-pressed="${ed.days.includes(d)}">${DAY_LABELS[d]}</button>`).join('');
     return `<div class="head">
-        <button type="button" class="round" data-a="back" data-k="" aria-label="Zpět">${icon('chevronLeft')}</button>
+        <button type="button" class="round" data-a="back" data-k="" aria-label="Zpět" ${busy ? 'disabled' : ''}>${icon('chevronLeft')}</button>
         <div class="t"><span class="sec">${esc(valveTitle)} · ${esc(progName)}</span><span class="title">${ed.existing ? 'Upravit rozvrh' : 'Nový rozvrh'}</span></div>
         ${ed.existing ? `<button type="button" class="round" data-a="copy" data-k="" aria-label="Kopírovat tento rozvrh">${icon('contentCopy')}</button>
         <button type="button" class="round" data-a="del" data-k="" aria-label="Smazat rozvrh" ${busy ? 'disabled' : ''}>${icon('deleteOutline')}</button>` : ''}
       </div>
-      ${ed.confirm ? `<div class="confirm" role="alertdialog" aria-label="Smazat rozvrh"><span>Smazat rozvrh ${esc(daysLabel(ed.days))}?</span>
+      ${ed.confirm ? `<div class="confirm" role="alertdialog" aria-label="Smazat rozvrh"><span>Smazat rozvrh ${esc(daysLabel(ed.existing?.days ?? ed.days))}?</span>
         <button type="button" class="btn small" data-a="delno" data-k="">Zrušit</button><button type="button" class="btn small danger" data-a="delok" data-k="" ${busy ? 'disabled' : ''}>Smazat</button></div>` : ''}
       ${errHtml}
+      ${ed.stale ? '<div class="err stale" role="alert"><span>Rozvrh se mezitím změnil</span><button type="button" class="btn small" data-a="reload" data-k="">Načíst znovu</button></div>' : ''}
       <div class="col"><span class="label">Dny</span><div class="days">${daysHtml}</div></div>
       <div class="col"><span class="label">Průběh dne</span><div class="edbar">${segs}${handles}</div><div class="hlabels">${hlabels}</div></div>
       <div class="panel">
         <div class="l"><span class="label">Úsek ${fmtTime(cur.start)}–${fmtTime(cur.end)}</span>
-          ${stepTile('Začátek', cur.start, 'sdn', 'sup', ed.sel > 0)}${stepTile('Konec', cur.end, 'edn', 'eup', ed.sel < last)}
+          ${stepTile('Začátek', cur.start, 'sdn', 'sup', ed.sel > 0 || cur.start > 0)}${stepTile('Konec', cur.end, 'edn', 'eup', ed.sel < last)}
           <div class="grid2">
             <button type="button" class="btn small" data-a="split" data-k="" ${cur.end - cur.start >= 2 * step ? '' : 'disabled'}><span style="color:var(--c-accent);display:inline-flex">${icon('split', 18)}</span>Rozdělit</button>
             <button type="button" class="btn small" data-a="rm" data-k="" ${sl.length > 1 ? '' : 'disabled'}><span style="color:var(--c-accent);display:inline-flex">${icon('deleteOutline', 18)}</span>Smazat</button>
@@ -961,10 +1033,10 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
           <div class="pair">${btn('tdn', 'Snížit teplotu', icon('minus'), cur.temp <= TEMP_MIN)}${btn('tup', 'Zvýšit teplotu', icon('plus'), cur.temp >= TEMP_MAX)}</div>
         </div>
       </div>
-      ${block ? `<span class="why" role="status">${esc(block)}</span>` : ''}
+      <span class="why" role="status">${esc(block)}</span>
       <div class="grid2">
-        <button type="button" class="btn wide" data-a="back" data-k="c">Zrušit</button>
-        <button type="button" class="btn primary wide" data-a="save" data-k="" ${block || busy ? 'disabled' : ''}>${icon('check')}Uložit</button>
+        <button type="button" class="btn wide" data-a="back" data-k="c" ${busy ? 'disabled' : ''}>Zrušit</button>
+        <button type="button" class="btn primary wide" data-a="save" data-k="" ${block || busy || ed.stale ? 'disabled' : ''}>${icon('check')}Uložit</button>
       </div>`;
   }
 
@@ -990,7 +1062,10 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
   _pickerHtml(list, errHtml) {
     const pick = this._pick, states = this._hass?.states ?? {};
     const names = Object.fromEntries(list.map((p) => [p.id, p.name]));
+    const seen = new Set(); // a climate listed in two circuits is one tile
     const tile = (v) => {
+      if (seen.has(v)) return '';
+      seen.add(v);
       const on = pick.valves.includes(v);
       const groups = [...groupByProgram(this._schedules, v)].filter(([, g]) => g.length);
       const n = groups.reduce((a, [, g]) => a + g.length, 0);
