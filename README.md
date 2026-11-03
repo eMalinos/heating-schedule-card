@@ -9,7 +9,7 @@ A Home Assistant card for the weekly heating schedules of climate valves, writte
 - **Copy to other valves**: a whole valve or selected schedules, Nahradit / Jen doplnit, with a per-valve preview.
 - **Programs**: a dashed `+ Program` chip and a *Programy* view (also from the settings): add, rename and delete programs of the circuit.
 - **Odd / even weeks**: a schedule can apply every week, only in odd weeks, or only in even weeks (tabs *Každý týden / Lichý / Sudý* in the editor while the alternation is on); the week view shows the current week and dims the rows of the other one. Day presets *Pracovní dny / Víkend / Každý den* in the editor.
-- **Public holidays**: a holiday runs by the Sunday schedule (Czech holidays built in, or any calendar of HA's Holiday integration); the settings list the next ones.
+- **Public holidays**: a holiday runs by the Sunday schedule (from a calendar of HA's Holiday integration, e.g. Czechia); the settings list the next ones.
 
 ![Week view](docs/week.png)
 ![Editor](docs/editor.png)
@@ -21,7 +21,7 @@ A Home Assistant card for the weekly heating schedules of climate valves, writte
 
 Not in HACS. Copy [`dist/heating-schedule-card.js`](dist/heating-schedule-card.js) to `config/www/`, then add a dashboard resource:
 
-Settings → Dashboards → ⋮ → Resources → Add resource → URL `/local/heating-schedule-card.js?v=0.2.0`, type **JavaScript module** → reload the browser. Change `?v=` after copying a new version.
+Settings → Dashboards → ⋮ → Resources → Add resource → URL `/local/heating-schedule-card.js?v=0.2.1`, type **JavaScript module** → reload the browser. Change `?v=` after copying a new version.
 
 ## Configuration
 
@@ -45,23 +45,23 @@ The card only stores schedules in scheduler-component; it never controls a valve
 - **Programs** come from the heating feature's `programs` parameter (`sensor.heating_program_<circuit>`: `programs` and `program_names`); Výchozí (`auto`) is always first. The chips show them, a schedule's program is its tag `program:<id>` (none = `auto`).
 - **Fallback**: a program with no schedule for a weekday uses the Výchozí schedule of that day, per day (same rules as the heating feature's `heating_slot_temp`). A program without schedules shows "používá výchozí rozvrh" and can be given its own copy of the Výchozí schedules.
 - **Weeks**: the tag `week:odd` / `week:even` (none = every week) limits a schedule to odd / even weeks. The weeks alternate strictly every 7 days, counted from Monday 2025-12-29 = odd (the heating's `heating_week_parity`; never ISO week % 2, because 2026 has ISO week 53), the badge shows that parity with the ISO number. The per-day fallback and the carry-over from the previous day use the week of the day they look at. Odd and even schedules of the same weekdays never conflict; a schedule without a tag conflicts with both. A copy keeps the tag.
-- **Holidays**: with *Státní svátky* set to *České* (built in, `czechHolidays`) or *Z kalendáře* (the dates the heating imported into `sensor.heating_programs_<circuit>`), a holiday counts as Sunday, as in the heating's `heating_slot_temp`. The now tile says *Svátek · podle neděle*.
+- **Holidays**: with *Státní svátky* set to *Z kalendáře* (a calendar of the Holiday integration, `calendar.czechia` preselected; the holidays the heating imported into `sensor.heating_programs_<circuit>` attribute `holidays`, `[{date, name}]`), a holiday counts as Sunday, as in the heating's `heating_slot_temp`. The now tile says *Svátek · podle neděle*.
 - **Pause**: the tag `paused` (the "Aktivní" toggle) removes a schedule from the heating without deleting it.
 - **Copy** writes new schedules for the target valves, tagged with the same program; a target valve whose circuit lacks the program is skipped.
 - A schedule the card cannot represent (not `repeat`, conditions, other actions, several valves, sun times, gaps) is shown read-only and never written.
 
 ### What the card writes besides schedules
 
-Needs heating 1.9.0 or newer (programs, weeks and holidays, #352). All helpers belong to the circuit (`<circuit>` = the heating instance):
+Needs heating 1.10.0 or newer (programs, weeks, holidays from the Holiday integration, #352, #356). All helpers belong to the circuit (`<circuit>` = the heating instance):
 
 | Action | Call |
 | --- | --- |
 | Add / rename / delete a program | `script.heating_programs_set_<circuit>` with `programs` = the whole list `[{id, name}]` without Výchozí; read back from `sensor.heating_programs_<circuit>` attribute `programs`. The id is a slug of the name (ASCII lower-case, `_`); `auto` and the name *Výchozí* are reserved, a used name or id is refused before writing. Deleting a program writes the list first (waits until both `sensor.heating_programs_<circuit>` and `sensor.heating_program_<circuit>` show it; a read-back that is late is re-checked after 5 s, not treated as a failure), then removes its schedules on the circuit's valves; a failing removal puts the removed schedules and the old list back. The running program, or a program with a read-only schedule, cannot be deleted from the card. The program lists come from `sensor.heating_program_<circuit>` everywhere; extra fields of the stored entries are kept. |
 | Střídat lichý a sudý týden | `input_boolean.toggle` on `input_boolean.heating_week_alternation_<circuit>` (it only shows the week controls; the tags always count) |
-| Státní svátky | `input_select.select_option` (`none` / `cz` / `calendar`) on `input_select.heating_holidays_<circuit>` |
-| Kalendář svátků | `input_text.set_value` on `input_text.heating_holiday_calendar_<circuit>` (a `calendar.*` entity); the holiday names of a calendar are fetched with `calendar.get_events`, best effort |
+| Státní svátky | `input_select.select_option` (`none` / `calendar`; any other stored value shows as *Žádné*) on `input_select.heating_holidays_<circuit>` |
+| Kalendář svátků | `input_text.set_value` on `input_text.heating_holiday_calendar_<circuit>` (a `calendar.*` entity; set to `calendar.czechia` when *Z kalendáře* is chosen and none is set yet) |
 
-The settings list the next holidays from `sensor.heating_schedule_<circuit>` attribute `holidays_next`.
+The settings list the next holidays from `sensor.heating_schedule_<circuit>` attribute `holidays_next` (dates and names; the card fetches nothing from the calendar itself).
 
 One scheduler-component schedule = one program's weekdays with timeslots covering 00:00-24:00, one `climate.set_temperature` action each.
 

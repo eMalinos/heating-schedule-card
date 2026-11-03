@@ -112,9 +112,9 @@ const V3 = [
   item('a2', ['sat', 'sun'], 'auto', [[0, 7.5, 18], [7.5, 23, 21], [23, 24, 18]]),
   item('v1', ['daily'], 'vacation', [[0, 24, 16]]),
 ];
-const V3STATES = (hol = 'cz') => ({
+const V3STATES = (hol = 'calendar') => ({
   [`sensor.heating_program_${C}`]: { state: 'auto', attributes: { programs: ['auto', 'vacation', 'chata'], program_names: { auto: 'Výchozí', vacation: 'Dovolená', chata: 'Chata' } } },
-  [`sensor.heating_programs_${C}`]: { state: '2', attributes: { programs: [{ id: 'vacation', name: 'Dovolená' }, { id: 'chata', name: 'Chata' }], holiday_dates: [], holiday_error: null } },
+  [`sensor.heating_programs_${C}`]: { state: '2', attributes: { programs: [{ id: 'vacation', name: 'Dovolená' }, { id: 'chata', name: 'Chata' }], holidays: [], holiday_error: null } },
   [`input_boolean.heating_week_alternation_${C}`]: { state: 'on', attributes: {} },
   [`input_select.heating_holidays_${C}`]: { state: hol, attributes: {} },
   [`input_text.heating_holiday_calendar_${C}`]: { state: '', attributes: {} },
@@ -134,7 +134,7 @@ else if (shot === 'editor3') { // Editor3: Po–Pá lichý, the 16:00–22:00 sl
 } else if (shot === 'settings') { // Settings3 (&cal=1: SettingsCal3)
   items = V3;
   const cal = q.has('cal');
-  const c = await mk('', { ...V3STATES(cal ? 'calendar' : 'cz'), ...(cal ? { 'calendar.slovakia': { state: 'off', attributes: {} }, [`input_text.heating_holiday_calendar_${C}`]: { state: 'calendar.slovakia', attributes: {} } } : {}) });
+  const c = await mk('', { ...V3STATES(cal ? 'calendar' : 'none'), ...(cal ? { 'calendar.czechia': { state: 'off', attributes: {} }, [`input_text.heating_holiday_calendar_${C}`]: { state: 'calendar.czechia', attributes: {} } } : {}) });
   c.shadowRoot.querySelector('[data-a="cog"]').click();
 }
 document.title = `shot ${shot}`;

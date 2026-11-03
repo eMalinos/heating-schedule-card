@@ -5,7 +5,7 @@ import {
   normalizeConfig, circuitName, parseSchedule, toPayload, effective, slotAt, groupByProgram, daysLabel, tempColor, fmtTemp, fmtTime,
   discoverCircuits, loadSchedules, saveSchedule, removeSchedule, nowState, DASH, isFallbackProgram, barSegments, slotsSummary,
   normalizeSlots, splitSlot, removeSlot, moveBoundary, setTemp, daysConflict, planCopy, copyable,
-  weekParity, isoWeek, czechHolidays, holidayDates, slugify, checkProgram, ymd,
+  weekParity, isoWeek, holidayDates, slugify, checkProgram, ymd,
 } from '../dist/heating-schedule-card.js';
 
 process.env.TZ = 'Europe/Prague'; // the DST test needs a zone with a spring-forward day
@@ -648,24 +648,14 @@ test('weekParity: strict 14-day rhythm from 2025-12-29, never ISO week % 2 (heat
   assert.equal(isoWeek(new Date(2027, 0, 4)), 1);
 });
 
-test('czechHolidays: 13 dates by date with names, Easter from the algorithm; holidayDates by mode', () => {
-  const cz = czechHolidays(2026), dates = cz.map((h) => h.date);
-  assert.equal(cz.length, 13);
-  assert.deepEqual(dates, [...dates].sort());
-  assert.ok(['2026-04-03', '2026-04-06', '2026-01-01', '2026-12-26'].every((d) => dates.includes(d)));
-  assert.equal(cz.find((h) => h.date === '2026-04-03').name, 'Velký pátek');
-  assert.equal(cz.find((h) => h.date === '2026-04-06').name, 'Velikonoční pondělí');
-  assert.equal(cz.find((h) => h.date === '2026-12-24').name, 'Štědrý den');
-  assert.deepEqual(czechHolidays(2027).filter((h) => /^Velk|^Velikonoční/.test(h.name)).map((h) => h.date), ['2027-03-26', '2027-03-29']);
+test('holidayDates: only mode calendar, from the holidays attribute [{date, name}]', () => {
   const st = (mode, extra = {}) => ({ 'input_select.heating_holidays_c1': { state: mode }, ...extra });
-  const now = at(2026, 11, 2);
-  assert.equal(holidayDates(st('none'), 'c1', now).size, 0);
-  assert.equal(holidayDates({}, 'c1', now).size, 0);
-  const czSet = holidayDates(st('cz'), 'c1', now);
-  assert.ok(czSet.has('2026-11-17') && czSet.has('2027-01-01') && czSet.has('2025-12-25'));
-  const cal = holidayDates(st('calendar', { 'sensor.heating_programs_c1': { attributes: { holiday_dates: ['2026-11-04', 'junk', 7, '2026-12-24'] } } }), 'c1', now);
-  assert.deepEqual([...cal], ['2026-11-04', '2026-12-24']);
-  assert.equal(holidayDates(st('calendar'), 'c1', now).size, 0);
+  const hp = { 'sensor.heating_programs_c1': { attributes: { holidays: [{ date: '2026-11-04', name: 'x' }, { date: 'junk' }, 7, null, { date: '2026-12-24', name: 'Štědrý den' }], holiday_dates: ['2026-01-01'] } } };
+  assert.equal(holidayDates(st('none', hp), 'c1').size, 0);
+  assert.equal(holidayDates(st('cz', hp), 'c1').size, 0); // a stored value outside none / calendar = none
+  assert.equal(holidayDates({}, 'c1').size, 0);
+  assert.deepEqual([...holidayDates(st('calendar', hp), 'c1')], ['2026-11-04', '2026-12-24']); // holiday_dates is not read
+  assert.equal(holidayDates(st('calendar'), 'c1').size, 0);
 });
 
 test('slotAt = heating_slot_temp: the week, holiday and carry-over vectors of heating test_schedule.py', () => {

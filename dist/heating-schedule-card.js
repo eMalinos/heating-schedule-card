@@ -1,6 +1,7 @@
 // heating-schedule-card: weekly heating schedules of climate valves, stored by scheduler-component.
 // One plain ES module: no build step, no dependencies. Pure functions are exported for `node --test`.
-const VERSION = '0.2.0';
+const VERSION = '0.2.1';
+const CZ_CALENDAR = 'calendar.czechia'; // the calendar the Holiday integration creates for Czechia
 
 export const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_LABELS = { mon: 'Po', tue: 'Út', wed: 'St', thu: 'Čt', fri: 'Pá', sat: 'So', sun: 'Ne' };
@@ -46,7 +47,7 @@ export function tempColor(t, dark = false) {
   return '#' + a.map((v, k) => Math.round(v + (b[k] - v) * f).toString(16).toUpperCase().padStart(2, '0')).join('');
 }
 
-// ---------- weeks and holidays (the same rules as heating's `heating_week_parity`, `heating_cz_holidays`) ----------
+// ---------- weeks and holidays (the same rules as heating's `heating_week_parity`, `heating_holidays`) ----------
 
 /**
  * 'odd' | 'even' week of `date`: a strict every-7-days alternation counted from Monday 2025-12-29 (= odd), exactly as
@@ -65,29 +66,11 @@ export function isoWeek(date) {
   return 1 + Math.round(((d - jan4) / 864e5 - 3 + ((jan4.getUTCDay() + 6) % 7)) / 7);
 }
 
-const CZ_FIXED = [['01-01', 'Den obnovy samostatného českého státu'], ['05-01', 'Svátek práce'], ['05-08', 'Den vítězství'],
-  ['07-05', 'Den slovanských věrozvěstů Cyrila a Metoděje'], ['07-06', 'Den upálení mistra Jana Husa'], ['09-28', 'Den české státnosti'],
-  ['10-28', 'Den vzniku samostatného československého státu'], ['11-17', 'Den boje za svobodu a demokracii'], ['12-24', 'Štědrý den'],
-  ['12-25', '1. svátek vánoční'], ['12-26', '2. svátek vánoční']];
-
-/** Czech public holidays of `year` -> [{date: 'YYYY-MM-DD', name}] by date: the list of heating's `heating_cz_holidays`. */
-export function czechHolidays(year) {
-  const a = year % 19, b = Math.floor(year / 100), c = year % 100, d = Math.floor(b / 4), e = b % 4, f = Math.floor((b + 8) / 25);
-  const g = Math.floor((b - f + 1) / 3), h = (19 * a + b - d - g + 15) % 30, i = Math.floor(c / 4), k = c % 4;
-  const l = (32 + 2 * e + 2 * i - h - k) % 7, m = Math.floor((a + 11 * h + 22 * l) / 451);
-  const month = Math.floor((h + l - 7 * m + 114) / 31), day = ((h + l - 7 * m + 114) % 31) + 1; // Easter Sunday
-  const easter = (off) => ymd(new Date(year, month - 1, day + off));
-  return [{ date: easter(-2), name: 'Velký pátek' }, { date: easter(1), name: 'Velikonoční pondělí' },
-    ...CZ_FIXED.map(([md, name]) => ({ date: `${year}-${md}`, name }))].sort((x, y) => (x.date < y.date ? -1 : 1));
-}
-
-/** The circuit's public holidays as a Set of 'YYYY-MM-DD' (heating's `heating_holidays`): `cz` built in (last, this and next year), `calendar` = the imported dates. */
-export function holidayDates(states, id, now = new Date()) {
-  const mode = states?.[`input_select.heating_holidays_${id}`]?.state;
-  if (mode === 'cz') return new Set([-1, 0, 1].flatMap((o) => czechHolidays(now.getFullYear() + o)).map((h) => h.date));
-  if (mode !== 'calendar') return new Set();
-  const dates = states?.[`sensor.heating_programs_${id}`]?.attributes?.holiday_dates;
-  return new Set((Array.isArray(dates) ? dates : []).filter((d) => typeof d === 'string' && /^\d{4}-\d\d-\d\d$/.test(d)));
+/** The circuit's public holidays as a Set of 'YYYY-MM-DD' (heating's `heating_holidays`): only mode `calendar`, the dates of `sensor.heating_programs_<circuit>` attribute `holidays` ([{date, name}]). */
+export function holidayDates(states, id) {
+  if (states?.[`input_select.heating_holidays_${id}`]?.state !== 'calendar') return new Set();
+  const list = states?.[`sensor.heating_programs_${id}`]?.attributes?.holidays;
+  return new Set((Array.isArray(list) ? list : []).map((h) => h?.date).filter((d) => typeof d === 'string' && /^\d{4}-\d\d-\d\d$/.test(d)));
 }
 
 /** Another schedule's week tag overlaps this one: no tag (every week) overlaps both, `odd` and `even` never. */
@@ -813,7 +796,6 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     this._seq = 0;
     this._view = 'week'; // 'week' | 'picker' | 'editor' | 'copy' | 'programs' | 'settings'
     this._pg = null; // programs view state while view is 'programs'
-    this._calNames = new Map(); // calendar entity -> {date: event title}, fetched best effort for the holiday list
     this._copy = null; // copy view state while view is 'copy'
     this._ed = null; // editor state while view is 'editor'
     this._pick = null; // valve picker state while view is 'picker'
@@ -982,11 +964,11 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
 
   /** The holidays the heating rules use for this circuit: `{holidays: Set}`. */
   _ctx(circuit = this._circuit(), now = new Date()) {
-    // rebuilt only when the circuit, the mode, the year or the imported dates (by reference) change, not on every render
-    const st = this._hass?.states, mode = st?.[`input_select.heating_holidays_${circuit.id}`]?.state, dates = st?.[`sensor.heating_programs_${circuit.id}`]?.attributes?.holiday_dates;
+    // rebuilt only when the circuit, the mode, the year or the holidays (by reference) change, not on every render
+    const st = this._hass?.states, mode = st?.[`input_select.heating_holidays_${circuit.id}`]?.state, dates = st?.[`sensor.heating_programs_${circuit.id}`]?.attributes?.holidays;
     const m = this._holMemo?.get(circuit.id), year = now.getFullYear();
     if (m && m.mode === mode && m.year === year && m.dates === dates) return { holidays: m.set };
-    const set = holidayDates(st, circuit.id, now);
+    const set = holidayDates(st, circuit.id);
     (this._holMemo ??= new Map()).set(circuit.id, { mode, year, dates, set });
     return { holidays: set };
   }
@@ -1011,7 +993,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
       s(`sensor.heating_applying_${id}`), a(`sensor.heating_applying_${id}`, 'left'),
       a(`sensor.heating_schedule_${id}`, 'targets'), a(`sensor.heating_schedule_${id}`, 'holidays_next'),
       s(`input_boolean.heating_week_alternation_${id}`), s(`input_select.heating_holidays_${id}`), s(`input_text.heating_holiday_calendar_${id}`),
-      a(`sensor.heating_programs_${id}`, 'programs'), a(`sensor.heating_programs_${id}`, 'holiday_dates'), a(`sensor.heating_programs_${id}`, 'holiday_error'),
+      a(`sensor.heating_programs_${id}`, 'programs'), a(`sensor.heating_programs_${id}`, 'holidays'), a(`sensor.heating_programs_${id}`, 'holiday_error'),
       this._view === 'settings' ? Object.keys(st).filter((e) => e.startsWith('calendar.')) : null,
     ]);
   }
@@ -1032,7 +1014,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
       const ev = new CustomEvent('hsc-edit', { bubbles: true, composed: true, cancelable: true, detail: { valve: this._valve, program: this._prog, schedule: id ? this._schedules.find((s) => s.id === id) : null } });
       if (this.dispatchEvent(ev)) this._onEdit(ev);
     } else if (a === 'copyOpen') this._announceCopy({ valve: this._valve, program: this._prog, schedule: null });
-    else if (a === 'cog') { this._view = 'settings'; this._fetchCalNames(); this._render(true); }
+    else if (a === 'cog') { this._view = 'settings'; this._render(true); }
     else if (a === 'addprog') this._openPrograms('week');
     else if (a.startsWith('pg-')) this._progAction(a, el.dataset.k);
     else if (a.startsWith('st-')) this._settingsAction(a, el.dataset.k);
@@ -1613,50 +1595,36 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
 
   // ---------- settings ----------
 
-  /** Titles of a calendar's events by date (calendar.get_events), best effort: a failure leaves the holiday names blank. */
-  async _fetchCalNames(entity) {
-    const c = this._circuit(), st = this._hass?.states ?? {};
-    const ent = entity ?? st[`input_text.heating_holiday_calendar_${c?.id}`]?.state;
-    if (!c || typeof ent !== 'string' || !ent.startsWith('calendar.') || this._calNames.has(ent)) return;
-    this._calNames.set(ent, {});
-    try {
-      const from = new Date(), to = new Date(from.getFullYear() + 1, from.getMonth(), from.getDate());
-      const r = await this._hass.callWS({ type: 'call_service', domain: 'calendar', service: 'get_events', return_response: true,
-        service_data: { entity_id: ent, start_date_time: `${ymd(from)} 00:00:00`, end_date_time: `${ymd(to)} 00:00:00` } });
-      const names = {};
-      for (const ev of r?.response?.[ent]?.events ?? []) if (ev.summary) names[String(ev.start).slice(0, 10)] ??= ev.summary;
-      this._calNames.set(ent, names);
-      if (this._view === 'settings') this._render();
-    } catch { this._calNames.delete(ent); }
-  }
-
   _settingsAction(a, k) {
     const c = this._circuit(), id = c.id;
     const call = (domain, service, data) => Promise.resolve().then(() => this._hass.callService(domain, service, data)).catch((err) => this._fail(err));
     if (a === 'st-back') { this._view = 'week'; this._render(true); }
     else if (a === 'st-prog') this._openPrograms('settings');
     else if (a === 'st-alt') call('input_boolean', 'toggle', { entity_id: `input_boolean.heating_week_alternation_${id}` });
-    else if (a === 'st-hol') call('input_select', 'select_option', { entity_id: `input_select.heating_holidays_${id}`, option: k }).then(() => k === 'calendar' && this._fetchCalNames());
-    else if (a === 'st-cal') call('input_text', 'set_value', { entity_id: `input_text.heating_holiday_calendar_${id}`, value: k }).then(() => this._fetchCalNames(k));
+    else if (a === 'st-hol') {
+      call('input_select', 'select_option', { entity_id: `input_select.heating_holidays_${id}`, option: k });
+      // the Holiday integration's Czechia calendar is the default when no calendar is set yet
+      if (k === 'calendar' && !this._hass.states[`input_text.heating_holiday_calendar_${id}`]?.state && this._hass.states[CZ_CALENDAR]) call('input_text', 'set_value', { entity_id: `input_text.heating_holiday_calendar_${id}`, value: CZ_CALENDAR });
+    }
+    else if (a === 'st-cal') call('input_text', 'set_value', { entity_id: `input_text.heating_holiday_calendar_${id}`, value: k });
   }
 
   _settingsHtml(circuit, errHtml) {
     const id = circuit.id, st = this._hass?.states ?? {}, att = (e, a) => st[e]?.attributes?.[a];
-    const alt = this._alternates(circuit), mode = st[`input_select.heating_holidays_${id}`]?.state ?? 'none';
-    const cal = st[`input_text.heating_holiday_calendar_${id}`]?.state ?? '';
+    const alt = this._alternates(circuit), mode = st[`input_select.heating_holidays_${id}`]?.state === 'calendar' ? 'calendar' : 'none'; // anything else shows as Žádné
+    const cal = st[`input_text.heating_holiday_calendar_${id}`]?.state || (st[CZ_CALENDAR] ? CZ_CALENDAR : '');
     const parity = weekParity(new Date());
     const calendars = Object.keys(st).filter((e) => e.startsWith('calendar.'));
     if (cal && !calendars.includes(cal)) calendars.unshift(cal);
-    const names = this._calNames.get(cal) ?? {};
     const next = (Array.isArray(att(`sensor.heating_schedule_${id}`, 'holidays_next')) ? att(`sensor.heating_schedule_${id}`, 'holidays_next') : []);
     const fmt = (iso) => `${Number(String(iso).slice(8, 10))}. ${Number(String(iso).slice(5, 7))}.`;
     const tab = (k, label) => `<button type="button" class="tab" data-a="st-hol" data-k="${k}" aria-pressed="${mode === k}" ${st[`input_select.heating_holidays_${id}`] ? '' : 'disabled'}>${label}</button>`;
     const err = mode === 'calendar' ? att(`sensor.heating_programs_${id}`, 'holiday_error') : null;
     const picker = mode === 'calendar' ? `<label class="tile sel"><span class="tx"><span class="sec">Kalendář svátků (integrace Holiday)</span><b>${esc(cal || 'Vyber kalendář')}</b></span>${icon('chevronDown')}
         <select data-a="st-cal" aria-label="Kalendář svátků"><option value=""${cal ? '' : ' selected'}>Vyber kalendář</option>${calendars.map((e) => `<option value="${esc(e)}"${e === cal ? ' selected' : ''}>${esc(e)}</option>`).join('')}</select></label>
-        <span class="sec">Kalendář přidáte integrací Holiday (Nastavení › Zařízení a služby › Přidat integraci › Holiday).</span>${err ? `<div class="err">Kalendář se nenačetl: ${esc(err)}</div>` : ''}` : '';
+        <span class="sec">Svátky přidáte integrací Holiday (Nastavení › Zařízení a služby › Přidat integraci › Holiday, země Česko).</span>${err ? `<div class="err">Kalendář se nenačetl: ${esc(err)}</div>` : ''}` : '';
     const hols = mode === 'none' ? '' : `<div class="hols"><b>Nejbližší svátky · ve svátek se jede podle rozvrhu neděle</b>${next.length
-      ? next.map((h) => `<div class="h"><span>${esc(fmt(h.date))}</span><span>${esc(h.name ?? names[h.date] ?? '')}</span></div>`).join('') : '<span class="sec">Žádné nadcházející svátky.</span>'}</div>`;
+      ? next.map((h) => `<div class="h"><span>${esc(fmt(h.date))}</span><span>${esc(h.name ?? '')}</span></div>`).join('') : '<span class="sec">Žádné nadcházející svátky.</span>'}</div>`;
     const progs = this._progList(circuit);
     return `<div class="head">
         <button type="button" class="round" data-a="st-back" data-k="" aria-label="Zpět">${icon('chevronLeft')}</button>
@@ -1666,7 +1634,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
       <div class="swrow"><div class="tx"><b>Střídat lichý a sudý týden</b><span class="sec">Rozvrh pak platí každý týden, jen v lichém, nebo jen v sudém. Teď je ${WEEK_LABEL[parity]} týden.</span></div>
         <button type="button" class="switch" role="switch" aria-checked="${alt}" aria-label="Střídat lichý a sudý týden" data-a="st-alt" data-k="" ${st[`input_boolean.heating_week_alternation_${id}`] ? '' : 'disabled'}></button></div>
       <div class="col"><span class="label">Státní svátky</span>
-        <div class="tabs">${tab('none', 'Žádné')}${tab('cz', 'České')}${tab('calendar', 'Z kalendáře')}</div>
+        <div class="tabs">${tab('none', 'Žádné')}${tab('calendar', 'Z kalendáře')}</div>
         ${picker}${hols}</div>
       <button type="button" class="tile link" data-a="st-prog" data-k=""><span class="tx"><b>Programy</b><span class="sec">${esc(['Výchozí', ...progs.map((p) => p.name)].join(', '))}</span></span>${icon('chevronRight')}</button>`;
   }
