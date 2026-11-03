@@ -228,6 +228,234 @@
     r.sameHtml = c8.shadowRoot.querySelector('ha-card') === card8;
     c8.remove();
 
+    // --- editor (#342) ---
+    const click = (c, sel) => { const el = c.shadowRoot.querySelector(sel); if (!el) throw new Error('no element ' + sel + ' in ' + c.shadowRoot.querySelector('ha-card').textContent.replace(/\s+/g, ' ').slice(0, 200)); el.click(); };
+    const btnOn = (c, sel) => !c.shadowRoot.querySelector(sel).disabled;
+    const weekdays = { ...fixture[0], schedule_id: 'wk', entity_id: 'switch.schedule_wk', weekdays: ['mon', 'tue', 'wed', 'thu', 'fri'], name: 'keep me' };
+    items = [weekdays];
+    let calls = [];
+    const withValve = { valve: 'climate.kitchen_valve', circuits: [{ id: CID, valves: ['climate.kitchen_valve'] }] };
+    const c9 = await mkCard(mkHass({ callApi: async (m, path, body) => { calls.push({ path, body }); } }), withValve);
+    click(c9, '.row [data-a="open"]');
+    const sr = c9.shadowRoot;
+    r.edOpens = !!sr.querySelector('.edbar') && sr.textContent.includes('Upravit rozvrh') && sr.textContent.includes('Kuchyň · Výchozí')
+      && sr.querySelectorAll('.day[aria-pressed="true"]').length === 5 && sr.querySelectorAll('.edseg').length === 1;
+    // split, select the second half, + temperature, move its start, toggle Sat on, save
+    click(c9, '[data-a="split"]');
+    r.edSplit = sr.querySelectorAll('.edseg').length === 2 && sr.querySelectorAll('.handle').length === 1 && sr.querySelector('.hlabels').textContent === '12:00';
+    click(c9, '[data-a="sel"][data-k="1"]');
+    click(c9, '[data-a="tup"]'); click(c9, '[data-a="tup"]');
+    click(c9, '[data-a="sdn"]');
+    click(c9, '[data-a="day"][data-k="sat"]');
+    r.edFocusKept = sr.activeElement === null || sr.activeElement.dataset.a === 'day'; // no focus loss errors
+    r.edState = sr.querySelector('.dial b').textContent.startsWith('22') && sr.textContent.includes('11:45–24:00');
+    click(c9, '[data-a="save"]');
+    await tick(150);
+    const b = calls[0]?.body;
+    r.edSave = calls.length === 1 && calls[0].path === 'scheduler/edit' && b.schedule_id === 'wk' && b.name === 'keep me' && b.repeat_type === 'repeat'
+      && b.weekdays.join() === 'mon,tue,wed,thu,fri,sat' && b.tags.includes('program:auto') && b.tags.includes('kitchen_valve')
+      && JSON.stringify(b.timeslots.map((t) => [t.start, t.stop, t.actions[0].service_data.temperature])) === JSON.stringify([['00:00:00', '11:45:00', 21], ['11:45:00', '23:59:00', 22]]);
+    r.edBack = !c9.shadowRoot.querySelector('.edbar') && !!c9.shadowRoot.querySelector('.rows');
+
+    // new schedule: free weekdays prefilled (Sat, Sun), one slot at 20 °C, saved through scheduler/add, no id
+    calls = [];
+    click(c9, '[data-a="add"]');
+    r.newEd = sr.textContent.includes('Nový rozvrh') && [...sr.querySelectorAll('.day[aria-pressed="true"]')].map((x) => x.textContent).join() === 'So,Ne'
+      && sr.querySelector('.dial b').textContent.startsWith('20') && !sr.querySelector('[data-a="del"]');
+    click(c9, '[data-a="save"]');
+    await tick(150);
+    r.newSave = calls.length === 1 && calls[0].path === 'scheduler/add' && !('schedule_id' in calls[0].body) && calls[0].body.weekdays.join() === 'sat,sun'
+      && calls[0].body.tags.join() === 'program:auto' && calls[0].body.timeslots.length === 1 && calls[0].body.timeslots[0].stop === '23:59:00';
+
+    // a day another schedule of this valve and program uses blocks saving, with the reason
+    click(c9, '[data-a="add"]');
+    click(c9, '[data-a="day"][data-k="mon"]');
+    r.conflict = !btnOn(c9, '[data-a="save"]') && sr.querySelector('.why').textContent === 'Po už má jiný rozvrh';
+    click(c9, '[data-a="day"][data-k="mon"]'); click(c9, '[data-a="day"][data-k="sat"]'); click(c9, '[data-a="day"][data-k="sun"]');
+    r.noDays = !btnOn(c9, '[data-a="save"]') && sr.querySelector('.why').textContent === 'Vyber aspoň jeden den';
+    click(c9, '[data-a="back"][data-k="c"]');
+    r.cancel = !!sr.querySelector('.rows') && calls.length === 1;
+
+    // delete asks first, then removes; a failed write keeps the editor and the error
+    calls = [];
+    click(c9, '.row [data-a="open"]');
+    click(c9, '[data-a="del"]');
+    r.delConfirm = !!sr.querySelector('.confirm') && calls.length === 0;
+    click(c9, '[data-a="delno"]');
+    click(c9, '[data-a="del"]'); click(c9, '[data-a="delok"]');
+    await tick(150);
+    r.delDone = calls.length === 1 && calls[0].path === 'scheduler/remove' && calls[0].body.schedule_id === 'wk' && !!sr.querySelector('.rows');
+    c9.remove();
+
+    const c10 = await mkCard(mkHass({ callApi: async () => { throw new Error('nope'); } }));
+    click(c10, '.row [data-a="open"]');
+    click(c10, '[data-a="save"]');
+    await tick(150);
+    r.saveErr = !!c10.shadowRoot.querySelector('.edbar') && c10.shadowRoot.querySelector('.err')?.textContent === 'Chyba: nope';
+    c10.remove();
+
+    // read-only schedules and missing ones never open; a handler can veto the editor
+    items = [{ ...weekdays, repeat_type: 'single' }];
+    const c11 = await mkCard(mkHass());
+    const ro = c11._schedules[0];
+    c11._onEdit({ detail: { schedule: ro } });
+    r.roNoEditor = !c11.shadowRoot.querySelector('.edbar');
+    c11.remove();
+    items = [weekdays];
+    const c12 = await mkCard(mkHass());
+    c12.addEventListener('hsc-edit', (e) => e.preventDefault());
+    click(c12, '.row [data-a="open"]');
+    r.veto = !c12.shadowRoot.querySelector('.edbar');
+    c12.remove();
+
+    // general card (no `valve`): add asks for the valves, one schedule per valve; the second add fails -> the first is removed again
+    const two2 = { circuits: [{ id: CID, valves: ['climate.kitchen_valve', 'climate.bedroom_valve'] }] };
+    store = [weekdays]; adds = 0; removed.length = 0;
+    const bed = { ...hass.states, 'climate.bedroom_valve': { state: 'heat', attributes: { friendly_name: 'Ložnice' } } };
+    calls = [];
+    const c13 = await mkCard(mkHass({
+      states: bed, callWS: async () => store,
+      callApi: async (m, path, body) => {
+        calls.push({ path, body });
+        if (path === 'scheduler/add') {
+          if (++adds === 2 && c13._failSecond) throw new Error('bedroom failed');
+          store = [...store, { ...weekdays, schedule_id: `n${adds}`, entity_id: `switch.schedule_n${adds}`, weekdays: body.weekdays, tags: body.tags, timeslots: body.timeslots }];
+        } else if (path === 'scheduler/remove') { removed.push(body.schedule_id); store = store.filter((x) => x.schedule_id !== body.schedule_id); }
+      },
+    }), two2);
+    click(c13, '[data-a="add"]');
+    const s13 = c13.shadowRoot;
+    r.picker = s13.textContent.includes('Pro které hlavice?') && s13.querySelectorAll('.tile[aria-pressed="true"]').length === 1 && s13.textContent.includes('Pokračovat (1)')
+      && s13.textContent.includes('1 rozvrh · Výchozí') && s13.textContent.includes('bez rozvrhu');
+    click(c13, '[data-a="pv"][data-k="climate.bedroom_valve"]');
+    r.pickerCount = s13.textContent.includes('Pokračovat (2)');
+    click(c13, '[data-a="go"]');
+    r.pickerToEditor = !!s13.querySelector('.edbar') && s13.textContent.includes('Kuchyň, Ložnice · Výchozí');
+    click(c13, '[data-a="back"][data-k=""]');
+    r.backToPicker = s13.textContent.includes('Pro které hlavice?') && s13.textContent.includes('Pokračovat (2)');
+    click(c13, '[data-a="go"]');
+    c13._failSecond = true;
+    click(c13, '[data-a="save"]');
+    await tick(300);
+    r.multiRollback = adds === 2 && removed.join() === 'n1' && store.length === 1 && !!s13.querySelector('.edbar') && s13.querySelector('.err')?.textContent === 'Chyba: bedroom failed';
+    c13._failSecond = false; adds = 0; calls = [];
+    click(c13, '[data-a="save"]');
+    await tick(300);
+    r.multiSave = calls.filter((x) => x.path === 'scheduler/add').map((x) => x.body.timeslots[0].actions[0].entity_id).join() === 'climate.kitchen_valve,climate.bedroom_valve'
+      && !!s13.querySelector('.rows');
+    c13.remove();
+
+    // --- editor review fixes ---
+    // a schedule with a 06:00 first start keeps it: carry-over part shown muted, not selectable, starts written back
+    const late = { ...weekdays, timeslots: [{ ...weekdays.timeslots[0], start: '06:00', stop: '20:00' }, { ...weekdays.timeslots[0], start: '20:00', stop: '23:59', actions: [{ ...weekdays.timeslots[0].actions[0], service_data: { temperature: 19 } }] }] };
+    items = [late];
+    calls = [];
+    const c14 = await mkCard(mkHass({ callApi: async (m, path, body) => { calls.push({ path, body }); } }), withValve);
+    click(c14, '.row [data-a="open"]');
+    const s14 = c14.shadowRoot;
+    r.carry = !!s14.querySelector('.edseg.carry') && !s14.querySelector('.edseg.carry[data-a]') && s14.querySelectorAll('button.edseg').length === 2
+      && s14.querySelector('.edseg.carry').textContent === 'z předchozího dne';
+    click(c14, '[data-a="day"][data-k="sat"]');
+    click(c14, '[data-a="save"]');
+    await tick(150);
+    r.keepsStart = calls.length === 1 && calls[0].body.timeslots.map((t) => t.start).join() === '06:00:00,20:00:00' && calls[0].body.timeslots[1].stop === '23:59:00';
+
+    // stored version changed since the editor opened: no overwrite, "Načíst znovu" reloads it; paused / name come from the stored one
+    items = [weekdays];
+    calls = [];
+    const c15 = await mkCard(mkHass({ callApi: async (m, path, body) => { calls.push({ path, body }); } }), withValve);
+    const s15 = c15.shadowRoot;
+    click(c15, '.row [data-a="open"]');
+    items = [{ ...weekdays, tags: [...weekdays.tags, 'paused'], name: 'renamed' }]; // only paused / name: written with the stored ones
+    click(c15, '[data-a="day"][data-k="sat"]');
+    click(c15, '[data-a="save"]');
+    await tick(150);
+    r.keepsStored = calls.length === 1 && calls[0].body.tags.includes('paused') && calls[0].body.name === 'renamed' && calls[0].body.weekdays.join() === 'mon,tue,wed,thu,fri,sat';
+    calls = [];
+    items = [weekdays];
+    await c15._load();
+    click(c15, '.row [data-a="open"]');
+    items = [{ ...weekdays, timeslots: [{ ...weekdays.timeslots[0], actions: [{ ...weekdays.timeslots[0].actions[0], service_data: { temperature: 17 } }] }] }];
+    click(c15, '[data-a="save"]');
+    await tick(150);
+    r.stale = calls.length === 0 && s15.textContent.includes('Rozvrh se mezitím změnil') && !btnOn(c15, '[data-a="save"]');
+    click(c15, '[data-a="reload"]');
+    r.reloadStale = !!s15.querySelector('.edbar') && !s15.querySelector('.stale') && s15.querySelector('.dial b').textContent.startsWith('17') && btnOn(c15, '[data-a="save"]');
+    // delete confirmation names the stored days
+    click(c15, '[data-a="day"][data-k="mon"]');
+    click(c15, '[data-a="del"]');
+    r.delDays = s15.querySelector('.confirm span').textContent === 'Smazat rozvrh Po–Pá?';
+    c15.remove();
+
+    // a save in flight disables Zpět / Zrušit, and its completion does not close another editor
+    let release;
+    items = [weekdays];
+    const c16 = await mkCard(mkHass({ callApi: () => new Promise((res) => { release = res; }) }), withValve);
+    const s16 = c16.shadowRoot;
+    click(c16, '.row [data-a="open"]');
+    click(c16, '[data-a="save"]');
+    await tick(100);
+    r.busyBack = !btnOn(c16, '[data-a="back"][data-k=""]') && !btnOn(c16, '[data-a="back"][data-k="c"]');
+    const other = c16._ed;
+    c16._ed = { ...other };
+    release();
+    await tick(150);
+    r.noStaleLeave = c16._view === 'editor' && c16._ed !== null;
+    c16.remove();
+
+    // a reload that brings a conflict updates Uložit while a control has the focus
+    items = [weekdays];
+    const c17 = await mkCard(mkHass(), withValve);
+    const s17 = c17.shadowRoot;
+    click(c17, '[data-a="add"]'); // Sat and Sun are free
+    const tg = s17.querySelector('[data-a="day"][data-k="sat"]');
+    tg.focus();
+    items = [weekdays, { ...weekdays, schedule_id: 'sat1', entity_id: 'switch.schedule_sat1', weekdays: ['sat'] }];
+    await c17._load();
+    r.liveConflict = s17.activeElement === tg && !btnOn(c17, '[data-a="save"]') && s17.querySelector('.why').textContent === 'So už má jiný rozvrh';
+    c17.remove();
+
+    // created ids that never show up are dropped after a few loads
+    const c18 = await mkCard(mkHass());
+    c18._created.set('ghost', 0);
+    for (let n = 0; n < 5; n++) await c18._load();
+    r.createdPruned = !c18._created.has('ghost');
+    c18.remove();
+
+    // picker: programs = intersection, dedup of a valve in two circuits, rollback removes only its own
+    const st2 = { ...bed, 'sensor.heating_program_c2': { state: 'auto', attributes: { programs: ['auto', 'other'], program_names: { auto: 'Výchozí', other: 'Jiný' } } }, 'climate.far_valve': { state: 'heat', attributes: { friendly_name: 'Daleko' } } };
+    const cfg2 = { circuits: [{ id: CID, valves: ['climate.kitchen_valve', 'climate.bedroom_valve'] }, { id: 'c2', valves: ['climate.far_valve', 'climate.bedroom_valve'] }] };
+    store = []; adds = 0; removed.length = 0;
+    const c19 = await mkCard(mkHass({
+      states: st2, callWS: async () => store,
+      callApi: async (m, path, body) => {
+        if (path === 'scheduler/add') {
+          adds++;
+          if (adds === 2) throw new Error('second failed');
+          store = [...store, { ...weekdays, schedule_id: 'mine1', entity_id: 'switch.schedule_mine1', weekdays: body.weekdays, tags: body.tags, timeslots: body.timeslots },
+            { ...weekdays, schedule_id: 'foreign1', entity_id: 'switch.schedule_foreign1', weekdays: ['tue'], tags: ['program:auto'] }]; // someone else adds one meanwhile
+        } else if (path === 'scheduler/remove') { removed.push(body.schedule_id); store = store.filter((x) => x.schedule_id !== body.schedule_id); }
+      },
+    }), cfg2);
+    const s19 = c19.shadowRoot;
+    click(c19, '[data-a="add"]');
+    r.dedup = s19.querySelectorAll('.tile[data-a="pv"]').length === 3;
+    const optIds = () => [...s19.querySelectorAll('select[data-a="pickprog"] option')].map((o) => o.value).join();
+    r.pickerProgs1 = optIds() === 'auto,odd,vacation';
+    s19.querySelector('select[data-a="pickprog"]').value = 'odd';
+    s19.querySelector('select[data-a="pickprog"]').dispatchEvent(new Event('change', { bubbles: true }));
+    click(c19, '[data-a="pv"][data-k="climate.bedroom_valve"]'); // in both circuits: only the common programs
+    r.pickerProgs2 = optIds() === 'auto' && c19._pick.program === 'auto';
+    click(c19, '[data-a="pv"][data-k="climate.far_valve"]');
+    click(c19, '[data-a="go"]');
+    r.batchDedup = c19._ed.valves.join() === 'climate.kitchen_valve,climate.bedroom_valve,climate.far_valve';
+    r.batchOnce = new Set(c19._ed.valves).size === c19._ed.valves.length;
+    click(c19, '[data-a="save"]');
+    await tick(300);
+    r.ownRollback = adds === 2 && removed.join() === 'mine1' && store.some((x) => x.schedule_id === 'foreign1');
+    c19.remove();
+
+
     r.noErrors = errors.length === 0;
     const ok = Object.values(r).every(Boolean);
     document.getElementById('out').textContent = 'RESULT ' + (ok ? 'PASS ' : 'FAIL ') + JSON.stringify(r) + (errors.length ? ' ERRORS ' + JSON.stringify(errors) : '');

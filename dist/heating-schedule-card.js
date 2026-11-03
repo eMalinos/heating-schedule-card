@@ -209,6 +209,64 @@ export function saveSchedule(hass, model, existing = null) {
 export const removeSchedule = (hass, id) => hass.callApi('POST', 'scheduler/remove', { schedule_id: id });
 
 
+// ---------- editor: pure logic ----------
+// Editor slots = [{start, end, temp}] in minutes, sorted, covering 00:00-24:00. Every helper returns a new array (or the
+// same one when nothing can change).
+
+const snap = (m, step) => Math.round(m / step) * step;
+
+/** Copy of the slots for editing. A first slot after 00:00 stays as it is: the time before it is carried over from the previous day. */
+export const normalizeSlots = (slots) => slots.map((x) => ({ ...x }));
+
+/** Splits slot `i` in halves at the nearest `step`; both halves keep at least `step`. */
+export function splitSlot(slots, i, step = 15) {
+  const s = slots[i];
+  if (!s || s.end - s.start < 2 * step) return slots;
+  const mid = Math.min(s.end - step, Math.max(s.start + step, snap((s.start + s.end) / 2, step)));
+  return [...slots.slice(0, i), { ...s, end: mid }, { ...s, start: mid }, ...slots.slice(i + 1)];
+}
+
+/** Removes slot `i`: the previous slot grows over it, the first one is taken over by the next. The last slot stays. */
+export function removeSlot(slots, i) {
+  if (slots.length < 2 || !slots[i]) return slots;
+  if (i === 0) return [{ ...slots[1], start: slots[0].start }, ...slots.slice(2)];
+  return [...slots.slice(0, i - 1), { ...slots[i - 1], end: slots[i].end }, ...slots.slice(i + 1)];
+}
+
+/**
+ * Moves the boundary where slot `i` starts (= where `i - 1` ends) by `delta` minutes; both slots keep at least `step`.
+ * The first slot's start moves only when it is not 00:00 already (a schedule that carries the previous day over).
+ */
+export function moveBoundary(slots, i, delta, step = 15) {
+  if (i === 0 && slots[0]?.start > 0) {
+    const at = Math.min(slots[0].end - step, Math.max(0, slots[0].start + delta));
+    return at === slots[0].start ? slots : [{ ...slots[0], start: at }, ...slots.slice(1)];
+  }
+  if (i < 1 || i >= slots.length) return slots;
+  const a = slots[i - 1], b = slots[i];
+  if (a.start + step > b.end - step) return slots;
+  const at = Math.min(b.end - step, Math.max(a.start + step, b.start + delta));
+  if (at === b.start) return slots;
+  return [...slots.slice(0, i - 1), { ...a, end: at }, { ...b, start: at }, ...slots.slice(i + 1)];
+}
+
+export const TEMP_MIN = 5, TEMP_MAX = 30;
+
+/** Temperature of slot `i`, rounded to 0.5 and clamped to 5-30 °C. */
+export function setTemp(slots, i, t) {
+  if (!slots[i] || !Number.isFinite(t)) return slots;
+  const temp = Math.min(TEMP_MAX, Math.max(TEMP_MIN, Math.round(t * 2) / 2));
+  return slots.map((s, k) => (k === i ? { ...s, temp } : s));
+}
+
+/** Of `days`, those another schedule of the same valve and program already uses (`exceptId` = the one being edited). */
+export function daysConflict(schedules, valve, program, days, exceptId = null) {
+  const used = new Set(schedules.filter((s) => s.id !== exceptId && s.program === program && s.valves.includes(valve)).flatMap((s) => s.days));
+  return DAYS.filter((d) => days.includes(d) && used.has(d));
+}
+
+const plural = (n, one, few, many) => `${n} ${n === 1 ? one : n < 5 ? few : many}`;
+
 // ---------- week view: pure logic ----------
 
 const stateOf = (states, id) => states?.[id]?.state;
@@ -296,6 +354,10 @@ export function nowState({ states = {}, circuit, valve, schedules, program, now 
     fmtTemp(slot.temp), { tone: slot.temp });
 }
 
+const slotKey = (slots) => JSON.stringify(slots.map((x) => [x.start, x.temp]));
+/** The parts the editor writes (program, weekdays, slots) are equal. */
+const sameContent = (a, b) => a.program === b.program && a.days.join() === b.days.join() && slotKey(a.slots) === slotKey(b.slots);
+
 // ---------- element ----------
 
 const ICONS = {
@@ -309,6 +371,12 @@ const ICONS = {
   contentCopy: 'M19,21H8V7H19M19,5H8A2,2 0 0,0 6,7V21A2,2 0 0,0 8,23H19A2,2 0 0,0 21,21V7A2,2 0 0,0 19,5M16,1H4A2,2 0 0,0 2,3V17H4V3H16V1Z',
   plus: 'M19,13H13V19H11V13H5V11H11V5H13V11H19V13Z',
   chevronDown: 'M7.41,8.58L12,13.17L16.59,8.58L18,10L12,16L6,10L7.41,8.58Z',
+  chevronLeft: 'M15.41,16.58L10.83,12L15.41,7.41L14,6L8,12L14,18L15.41,16.58Z',
+  minus: 'M19,13H5V11H19V13Z',
+  check: 'M21,7L9,19L3.5,13.5L4.91,12.09L9,16.17L19.59,5.59L21,7Z',
+  checkCircle: 'M12 2C6.5 2 2 6.5 2 12S6.5 22 12 22 22 17.5 22 12 17.5 2 12 2M10 17L5 12L6.41 10.59L10 14.17L17.59 6.58L19 8L10 17Z',
+  deleteOutline: 'M6,19A2,2 0 0,0 8,21H16A2,2 0 0,0 18,19V7H6V19M8,9H16V19H8V9M15.5,4L14.5,3H9.5L8.5,4H5V6H19V4H15.5Z',
+  split: 'M18,16V13H15V22H13V2H15V11H18V8L22,12L18,16M2,12L6,16V13H9V22H11V2H9V11H6V8L2,12Z',
   fire: 'M17.66 11.2C17.43 10.9 17.15 10.64 16.89 10.38C16.22 9.78 15.46 9.35 14.82 8.72C13.33 7.26 13 4.85 13.95 3C13 3.23 12.17 3.75 11.46 4.32C8.87 6.4 7.85 10.07 9.07 13.22C9.11 13.32 9.15 13.42 9.15 13.55C9.15 13.77 9 13.97 8.8 14.05C8.57 14.15 8.33 14.09 8.14 13.93C8.08 13.88 8.04 13.83 8 13.76C6.87 12.33 6.69 10.28 7.45 8.64C5.78 10 4.87 12.3 5 14.47C5.06 14.97 5.12 15.47 5.29 15.97C5.43 16.57 5.7 17.17 6 17.7C7.08 19.43 8.95 20.67 10.96 20.92C13.1 21.19 15.39 20.8 17.03 19.32C18.86 17.66 19.5 15 18.56 12.72L18.43 12.46C18.22 12 17.66 11.2 17.66 11.2Z',
 };
 const icon = (name, size = 20) => `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="${ICONS[name]}"></path></svg>`;
@@ -398,6 +466,58 @@ const STYLE = `
   .note .tx { flex: 1; display: flex; flex-direction: column; gap: 2px; }
   .dim { opacity: .55; }
   .err { padding: 10px 14px; border-radius: 14px; background: color-mix(in srgb, var(--c-warm) 14%, var(--c-card)); color: var(--c-text); font-size: 13px; }
+  .round { width: 44px; height: 44px; flex: none; display: grid; place-items: center; padding: 0; border: 1px solid var(--c-border); border-radius: 50%; background: var(--c-raised); box-shadow: var(--c-raised-shadow); }
+  .btn.small { min-height: 44px; font-size: 13px; }
+  .btn.danger { color: var(--c-warm); }
+  .grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .col { display: flex; flex-direction: column; gap: 8px; }
+  .title { font-size: 20px; font-weight: 700; letter-spacing: -.4px; }
+  .days { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; }
+  .day { min-height: 44px; padding: 0; border: 0; border-radius: 14px; background: var(--c-fill); box-shadow: var(--c-inset); color: var(--c-text2); font-size: 14px; font-weight: 700; }
+  .day[aria-pressed="true"] { border: 1px solid color-mix(in srgb, var(--c-accent) 45%, var(--c-border)); background: var(--c-tint); box-shadow: var(--c-raised-shadow); color: var(--c-text); }
+  .edbar { position: relative; display: flex; gap: 3px; height: 64px; padding: 5px; border-radius: 19px; background: var(--c-fill); box-shadow: var(--c-inset); }
+  .edseg { flex: 1 1 0; min-width: 0; display: grid; place-items: center; padding: 0; border: 0; border-radius: 6px; color: #1c2128; font-size: 13px; font-weight: 700; box-shadow: inset 0 1px 0 rgba(255,255,255,.45);
+    background: linear-gradient(180deg, color-mix(in srgb, var(--c) 78%, #fff) 0%, var(--c) 100%); }
+  .edseg:first-of-type { border-top-left-radius: 14px; border-bottom-left-radius: 14px; }
+  .edseg:last-of-type { border-top-right-radius: 14px; border-bottom-right-radius: 14px; }
+  .edseg[aria-pressed="true"] { outline: 2.5px solid var(--c-text); outline-offset: 2px; z-index: 1; }
+  .handle { position: absolute; top: 50%; width: 10px; height: 34px; margin: -17px 0 0 -5px; box-sizing: border-box; border-radius: 999px; background: var(--c-raised); border: 1px solid var(--c-border); box-shadow: var(--c-raised-shadow); z-index: 2; pointer-events: none; }
+  .hlabels { position: relative; height: 16px; }
+  .hlabels span { position: absolute; top: 0; transform: translateX(-50%); font-size: 11px; font-weight: 600; color: var(--c-text2); font-variant-numeric: tabular-nums; }
+  .panel { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; padding: 14px; border-radius: 20px; border: 1px solid var(--c-border); background: linear-gradient(150deg, var(--c-card) 15%, color-mix(in srgb, var(--tone) 14%, var(--c-card)) 100%); }
+  .card.dark .panel { background: linear-gradient(150deg, var(--c-card) 15%, color-mix(in srgb, var(--tone) 22%, var(--c-card)) 100%); }
+  .panel .l { display: flex; flex-direction: column; gap: 10px; flex: 1 1 220px; min-width: 0; }
+  .panel .r { display: flex; flex-direction: column; align-items: center; gap: 10px; flex: none; margin: 0 auto; }
+  .ttile { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 8px 8px 14px; border-radius: 16px; background: var(--c-fill); box-shadow: var(--c-inset); }
+  .ttile b { display: block; font-size: 20px; font-weight: 700; letter-spacing: -.4px; }
+  .pair { display: flex; gap: 4px; padding: 3px; border-radius: 999px; background: var(--c-raised); border: 1px solid var(--c-border); box-shadow: var(--c-raised-shadow); }
+  .step { width: 44px; height: 38px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 999px; background: transparent; }
+  .step:disabled { opacity: .35; cursor: default; }
+  .dial { position: relative; width: 188px; height: 188px; }
+  .dial > div, .dial > span { position: absolute; }
+  .dial .ring { inset: 0; border-radius: 50%; }
+  .dial .face { left: 50%; top: 50%; width: 117px; height: 117px; margin: -58.5px 0 0 -58.5px; border-radius: 50%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; background: var(--c-card); box-shadow: 0 10px 26px rgba(40,55,80,.16), 0 0 0 1px var(--c-border); }
+  .card.dark .dial .face { box-shadow: 0 10px 26px rgba(0,0,0,.6), 0 0 0 1px var(--c-border); }
+  .dial .face b { font-size: 34px; font-weight: 700; letter-spacing: -1px; line-height: 1.05; }
+  .dial .face small { font-size: 13px; font-weight: 500; margin-left: 2px; }
+  .dial .knob2 { width: 22px; height: 22px; box-sizing: border-box; border-radius: 50%; box-shadow: 0 2px 6px rgba(0,0,0,.2); }
+  .dial .lim { bottom: 2px; font-size: 11px; font-weight: 600; color: var(--c-text2); }
+  .why { font-size: 13px; color: var(--c-warm); }
+  .why:empty { display: none; }
+  .edseg.carry { background: repeating-linear-gradient(135deg, var(--c-fill) 0 6px, color-mix(in srgb, var(--c-text2) 14%, var(--c-fill)) 6px 12px); color: var(--c-text2); font-size: 11px; font-weight: 600; box-shadow: none; cursor: default; }
+  .err.stale { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .err.stale span { flex: 1 1 160px; font-weight: 600; }
+  .tile { position: relative; display: flex; align-items: center; gap: 10px; min-width: 0; min-height: 56px; padding: 10px 12px; border: 1px solid transparent; border-radius: 16px; background: var(--c-fill); box-shadow: var(--c-inset); text-align: left; }
+  .tile[aria-pressed="true"] { border-color: color-mix(in srgb, var(--c-accent) 45%, var(--c-border)); background: var(--c-tint); box-shadow: var(--c-raised-shadow); }
+  .tile .tic { width: 32px; height: 32px; flex: none; border-radius: 50%; display: grid; place-items: center; background: var(--c-card); color: var(--c-warm); }
+  .tile[aria-pressed="true"] .tic { background: var(--c-accent); color: var(--c-on-accent); }
+  .tile .tx { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+  .tile .tx b { font-size: 14px; font-weight: 600; }
+  .tile .tx .sec { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tile.sel { justify-content: space-between; }
+  .tile.sel select { position: absolute; inset: 0; width: 100%; opacity: 0; }
+  .confirm { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px 14px; border-radius: 18px; background: color-mix(in srgb, var(--c-warm) 14%, var(--c-card)); }
+  .confirm span { flex: 1 1 160px; font-size: 14px; font-weight: 600; }
   button:focus-visible, select:focus-visible { outline: 2px solid var(--c-accent); outline-offset: 2px; }
   @container (max-width: 450px) {
     ha-card { padding: 16px; }
@@ -406,6 +526,7 @@ const STYLE = `
     .now .big { font-size: 22px; }
     .now .btn { flex: 1 1 100%; }
     .chip { padding: 0 14px; }
+    .dial { zoom: .9; }
   }
 `;
 
@@ -414,10 +535,13 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     super();
     this.attachShadow({ mode: 'open' });
     this._schedules = [];
-    this._created = new Set(); // ids of schedules just created: their switch is turned off once it exists
+    this._created = new Map(); // id -> loads that did not list it yet; schedules just created: their switch is turned off once it exists
     this._turning = new Set(); // ids with a turn_off in flight
     this._busy = new Set(); // ids of schedules being written (pause toggle), `copy` while the fallback copy runs
     this._seq = 0;
+    this._view = 'week'; // 'week' | 'picker' | 'editor'
+    this._ed = null; // editor state while view is 'editor'
+    this._pick = null; // valve picker state while view is 'picker'
     this.shadowRoot.addEventListener('click', (e) => this._click(e));
     this.shadowRoot.addEventListener('change', (e) => this._change(e));
     // a render deferred while something in the card had focus runs once the focus leaves
@@ -429,6 +553,8 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     this._valve = this._cfg.valve || this._cfg.circuits[0].valves[0];
     this._prog = null;
     this._progPicked = false; // until a chip is picked the card shows the running program
+    this._view = 'week';
+    this._ed = this._pick = null;
     this._sig = null;
     this._render(true);
   }
@@ -469,7 +595,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
   _subscribe() {
     if (this._unsub || !this._hass.connection) return;
     const p = this._hass.connection.subscribeMessage((ev) => {
-      if (ev?.event === 'scheduler_item_created' && ev.schedule_id) this._created.add(ev.schedule_id);
+      if (ev?.event === 'scheduler_item_created' && ev.schedule_id) this._created.set(ev.schedule_id, 0);
       clearTimeout(this._timer);
       this._timer = setTimeout(() => this._load(), 300);
     }, { type: 'scheduler_updated' });
@@ -498,9 +624,12 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
   /** scheduler-component creates every schedule on; this card keeps its own off (heating alone fires the valves). */
   _turnOff() {
     const mine = new Set(this._cfg.circuits.flatMap((c) => c.valves));
-    for (const id of [...this._created]) {
+    for (const id of [...this._created.keys()]) {
       const s = this._schedules.find((x) => x.id === id);
-      if (!s) continue; // not listed yet: retried on the next load
+      if (!s) { // not listed yet: retried on the next load, dropped after a few (rolled back or removed elsewhere)
+        if (this._created.get(id) >= 3) this._created.delete(id); else this._created.set(id, this._created.get(id) + 1);
+        continue;
+      }
       if (!s.valves.some((v) => mine.has(v))) { this._created.delete(id); continue; } // not ours: never touched
       if (!this._hass.states?.[s.switch] || this._turning.has(id)) continue; // switch entity not there yet
       this._turning.add(id);
@@ -508,6 +637,16 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
         .then(() => this._created.delete(id), () => {}) // failed: stays queued for the next load
         .then(() => this._turning.delete(id));
     }
+  }
+
+  _allValves() { return [...new Set(this._cfg.circuits.flatMap((c) => c.valves))]; }
+
+  /** Programs every picked valve's circuit(s) have (a valve listed in two circuits needs both). */
+  _pickerPrograms() {
+    const valves = this._pick.valves.length ? this._pick.valves : [this._valve];
+    const cs = [...new Set(valves.flatMap((v) => this._cfg.circuits.filter((c) => c.valves.includes(v))))];
+    const lists = cs.map((c) => this._programs(c).list);
+    return lists[0].filter((p) => lists.every((l) => l.some((q) => q.id === p.id)));
   }
 
   _circuit() { return this._cfg.circuits.find((c) => c.id === this._cfg.valveCircuit[this._valve]); }
@@ -544,9 +683,11 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
         .catch((err) => this._fail(err));
     }
     else if (a === 'open' || a === 'add') {
-      // the editor comes with #342; until then the card only announces the tap
-      this.dispatchEvent(new CustomEvent('hsc-edit', { bubbles: true, composed: true, detail: { valve: this._valve, program: this._prog, schedule: id ? this._schedules.find((s) => s.id === id) : null } }));
+      // rows and the add button announce `hsc-edit`; the editor opens unless a listener calls preventDefault
+      const ev = new CustomEvent('hsc-edit', { bubbles: true, composed: true, cancelable: true, detail: { valve: this._valve, program: this._prog, schedule: id ? this._schedules.find((s) => s.id === id) : null } });
+      if (this.dispatchEvent(ev)) this._onEdit(ev);
     } else if (a === 'copyDefault') this._copyDefault();
+    else this._editorAction(el.dataset);
   }
 
   _change(e) {
@@ -554,6 +695,139 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     if (!el) return;
     if (el.dataset.a === 'valve') { this._valve = el.value; this._prog = null; this._progPicked = false; this._render(true); }
     else if (el.dataset.a === 'pause') this._pause(el.dataset.id, !el.checked);
+    else if (el.dataset.a === 'pickprog' && this._pick) { this._pick.program = el.value; this._render(true); }
+  }
+
+  // ---------- editor ----------
+
+  _onEdit(e) {
+    if (this._view !== 'week') return;
+    const { schedule } = e.detail || {};
+    const prog = this._prog;
+    if (schedule) {
+      const s = this._schedules.find((x) => x.id === schedule.id);
+      if (!s || !s.editable) return; // read-only or gone: never opened
+      this._openExisting(s);
+    } else if (this._cfg.valve) {
+      this._newEditor([this._valve], prog);
+    } else {
+      this._pick = { valves: [this._valve], program: prog };
+      this._view = 'picker';
+    }
+    this._render(true);
+  }
+
+  _openExisting(s) {
+    this._ed = { existing: s, valves: [s.valve], program: s.program, days: [...s.days], slots: normalizeSlots(s.slots), sel: 0, confirm: false, stale: false };
+    this._view = 'editor';
+  }
+
+  /** A new schedule: one slot 00:00-24:00 at 20 °C, the weekdays no schedule of these valves and the program uses yet. */
+  _newEditor(valves, program) {
+    const used = valves.flatMap((v) => daysConflict(this._schedules, v, program, DAYS));
+    this._ed = { existing: null, valves, program, days: DAYS.filter((d) => !used.includes(d)), slots: [{ start: 0, end: DAY_END, temp: 20 }], sel: 0, confirm: false, stale: false };
+    this._pick = null;
+    this._view = 'editor';
+  }
+
+  /** Why Uložit is disabled, or ''. */
+  _saveBlock(ed) {
+    if (!ed.days.length) return 'Vyber aspoň jeden den';
+    const title = (v) => this._hass?.states?.[v]?.attributes?.friendly_name || v;
+    const parts = ed.valves.map((v) => [v, daysConflict(this._schedules, v, ed.program, ed.days, ed.existing?.id)]).filter(([, d]) => d.length);
+    if (!parts.length) return '';
+    return parts.map(([v, d]) => `${ed.valves.length > 1 ? `${title(v)}: ` : ''}${d.map((x) => DAY_LABELS[x]).join(', ')} už má jiný rozvrh`).join(' · ');
+  }
+
+  _editorAction({ a, k }) {
+    const ed = this._ed, step = this._cfg.timeStep, i = Number(k);
+    if (a === 'back') {
+      if (this._busy.has('ed')) return;
+      if (this._view === 'editor' && ed?.fromPicker) { this._view = 'picker'; this._pick = { valves: ed.valves, program: ed.program }; }
+      else { this._view = 'week'; this._pick = null; }
+      this._ed = null;
+      return this._render(true);
+    }
+    if (a === 'pv' && this._pick) {
+      const v = this._pick.valves;
+      this._pick.valves = v.includes(k) ? v.filter((x) => x !== k) : [...v, k];
+      if (!this._pickerPrograms().some((p) => p.id === this._pick.program)) this._pick.program = 'auto';
+      return this._render(true);
+    }
+    if (a === 'go' && this._pick?.valves.length) {
+      // keep the order of the circuits' valve lists
+      const all = this._allValves();
+      this._newEditor(all.filter((v) => this._pick.valves.includes(v)), this._pick.program);
+      this._ed.fromPicker = true;
+      return this._render(true);
+    }
+    if (this._view !== 'editor' || !ed) return;
+    if (a === 'day') ed.days = ed.days.includes(k) ? ed.days.filter((d) => d !== k) : [...ed.days, k];
+    else if (a === 'sel') ed.sel = i;
+    else if (a === 'sdn' || a === 'sup') ed.slots = moveBoundary(ed.slots, ed.sel, a === 'sdn' ? -step : step, step);
+    else if (a === 'edn' || a === 'eup') ed.slots = moveBoundary(ed.slots, ed.sel + 1, a === 'edn' ? -step : step, step);
+    else if (a === 'split') ed.slots = splitSlot(ed.slots, ed.sel, step);
+    else if (a === 'rm') { ed.slots = removeSlot(ed.slots, ed.sel); ed.sel = Math.min(ed.sel > 0 ? ed.sel - 1 : 0, ed.slots.length - 1); }
+    else if (a === 'tdn' || a === 'tup') ed.slots = setTemp(ed.slots, ed.sel, ed.slots[ed.sel].temp + (a === 'tdn' ? -0.5 : 0.5));
+    else if (a === 'copy') { this.dispatchEvent(new CustomEvent('hsc-copy', { bubbles: true, composed: true, detail: { valve: ed.valves[0], program: ed.program, schedule: ed.existing } })); return; }
+    else if (a === 'reload') {
+      const fresh = this._schedules.find((x) => x.id === ed.existing?.id);
+      if (fresh?.editable) this._openExisting(fresh); else this._leave();
+    }
+    else if (a === 'del') ed.confirm = true;
+    else if (a === 'delno') ed.confirm = false;
+    else if (a === 'delok') return this._deleteEditor();
+    else if (a === 'save') return this._saveEditor();
+    this._render(true);
+  }
+
+  _leave() { this._view = 'week'; this._ed = this._pick = null; }
+
+  _saveEditor() {
+    const ed = this._ed;
+    if (!ed || this._busy.has('ed') || ed.stale || this._saveBlock(ed)) return;
+    return this._write('ed', async () => {
+      const fresh = await loadSchedules(this._hass); // the stored state right now, not the list from a while ago
+      if (ed.existing) {
+        const cur = fresh.find((x) => x.id === ed.existing.id);
+        if (!cur || !cur.editable) throw new Error('Rozvrh už neexistuje nebo ho nelze upravovat');
+        if (!sameContent(cur, ed.existing)) { ed.stale = true; return; } // changed elsewhere: ask instead of overwriting
+        // days, slots and program come from the editor; paused, name, foreign tags and dates from the stored version
+        await saveSchedule(this._hass, { id: cur.id, valve: cur.valve, program: ed.program, days: ed.days, slots: ed.slots, paused: cur.paused }, cur);
+      } else {
+        if (ed.valves.some((v) => daysConflict(fresh, v, ed.program, ed.days).length)) throw new Error('Některý z dnů už má jiný rozvrh');
+        const before = new Set(fresh.map((x) => x.id));
+        const days = DAYS.filter((d) => ed.days.includes(d));
+        const expected = ed.valves.map((valve) => ({ valve, program: ed.program, days, slots: ed.slots }));
+        try {
+          for (const e of expected) await saveSchedule(this._hass, { ...e, paused: false });
+        } catch (err) { await this._rollback(before, expected); throw err; }
+      }
+      if (this._ed === ed) this._leave(); // another editor may be open by now
+    });
+  }
+
+  _deleteEditor() {
+    const ed = this._ed;
+    if (!ed?.existing || this._busy.has('ed')) return;
+    return this._write('ed', async () => { await removeSchedule(this._hass, ed.existing.id); if (this._ed === ed) this._leave(); });
+  }
+
+  /**
+   * Removes what a failed multi-step write already added: of the schedules not listed before it, only those whose valve,
+   * program, weekdays and slots equal one of the `expected` payloads (each matches at most once).
+   */
+  async _rollback(before, expected) {
+    try {
+      const left = [...expected];
+      for (const c of (await loadSchedules(this._hass)).filter((x) => !before.has(x.id))) {
+        const k = left.findIndex((e) => e.valve === c.valve && e.program === c.program && c.days.join() === e.days.join() && slotKey(c.slots) === slotKey(e.slots));
+        if (k < 0) continue;
+        left.splice(k, 1);
+        this._created.delete(c.id);
+        await removeSchedule(this._hass, c.id);
+      }
+    } catch { /* the original error is the one to show */ }
   }
 
   /** Shows a failed write / service call until the next successful write or for 10 s. */
@@ -593,24 +867,19 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     const groups = groupByProgram(this._schedules, valve);
     const src = (groups.get('auto') || []).filter((s) => !s.paused && s.editable);
     if (this._busy.has('copy') || !src.length || !isFallbackProgram(groups, prog)) return;
-    const before = new Set(this._schedules.map((s) => s.id));
     return this._write('copy', async () => {
+      const before = new Set((await loadSchedules(this._hass)).map((x) => x.id));
+      const expected = src.map((s) => ({ valve: s.valve, program: prog, days: s.days, slots: s.slots }));
       try {
         for (const s of src) await saveSchedule(this._hass, { ...s, id: undefined, program: prog, paused: false });
-      } catch (err) {
-        // roll back the copies already added (new schedules of this valve and program), then report the original error
-        try {
-          for (const c of (await loadSchedules(this._hass)).filter((x) => !before.has(x.id) && x.program === prog && x.valves.includes(valve))) await removeSchedule(this._hass, c.id);
-        } catch { /* the original error is the one to show */ }
-        throw err;
-      }
+      } catch (err) { await this._rollback(before, expected); throw err; } // roll back the copies already added, report the original error
     });
   }
 
   // ---------- render ----------
 
-  _programs() {
-    const c = this._circuit(), st = this._hass?.states ?? {};
+  _programs(c = this._circuit()) {
+    const st = this._hass?.states ?? {};
     const p = st[`sensor.heating_program_${c.id}`];
     const running = p?.state && p.state !== 'unknown' && p.state !== 'unavailable' ? p.state : 'auto';
     const ids = p?.attributes?.programs?.length ? [...p.attributes.programs] : ['auto'];
@@ -677,9 +946,17 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     }</select></label>`;
 
     const err = this._subError || this._writeError || this._loadError;
-    const html = `<style>${STYLE}</style><ha-card><div class="card${dark ? ' dark' : ''}${ns.muted ? ' muted-bars' : ''}" style="--tone:${toneCss || 'transparent'}">
+    const errHtml = err ? `<div class="err">Chyba: ${esc(err)}</div>` : '';
+    const wrap = (inner, tone, cls = '') => `<style>${STYLE}</style><ha-card><div class="card${dark ? ' dark' : ''}${cls}" style="--tone:${tone || 'transparent'}">${inner}</div></ha-card>`;
+    let html;
+    if (this._view === 'editor' && this._ed) html = wrap(this._editorHtml(dark, errHtml), tempColor(this._ed.slots[this._ed.sel].temp, dark));
+    else if (this._view === 'picker' && this._pick) {
+      const plist = this._pickerPrograms();
+      if (!plist.some((p) => p.id === this._pick.program)) this._pick.program = 'auto';
+      html = wrap(this._pickerHtml(plist, errHtml), null);
+    } else html = wrap(`
       <div class="head"><div class="t"><span class="sec">${esc(circuitName(hass, circuit))}</span><b>${esc(title)}</b></div>${picker}</div>
-      ${err ? `<div class="err">Chyba: ${esc(err)}</div>` : ''}
+      ${errHtml}
       <div class="now${ns.muted || ns.tone == null ? ' muted' : ''}" data-kind="${ns.kind}">
         <span class="ic${toneCss ? ' tone' : ''}">${icon(ns.icon)}</span>
         <div class="tx"><b>${esc(ns.text)}</b><span class="sec">${esc(ns.sub)}</span></div>
@@ -689,13 +966,127 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
       <div class="progs"><span class="label">Program</span><div class="chips">${list.map((p) =>
         `<button type="button" class="chip" data-a="prog" data-id="${esc(p.id)}" aria-pressed="${p.id === prog}">${p.id === running ? '<span class="dot" title="Běží"></span>' : ''}${esc(p.name)}</button>`).join('')}</div></div>
       ${main}
-    </div></ha-card>`;
+    `, toneCss, ns.muted ? ' muted-bars' : '');
     if (html === this._html) { this._dirty = false; return; }
     // an automatic render never rebuilds the DOM under the user's hands (focused control, open select)
-    if (!force && this.shadowRoot.activeElement) { this._dirty = true; return; }
+    if (!force && this.shadowRoot.activeElement) {
+      this._dirty = true;
+      if (this._view === 'editor' && this._ed) this._patchSave(); // the save button must not lag behind a reload
+      return;
+    }
     this._dirty = false;
     this._html = html;
+    // a pressed editor control keeps the focus through the rebuild (keyboard and screen reader users)
+    const f = this.shadowRoot.activeElement?.dataset;
     this.shadowRoot.innerHTML = html;
+    if (f?.a && f.k != null) [...this.shadowRoot.querySelectorAll('[data-a][data-k]')].find((x) => x.dataset.a === f.a && x.dataset.k === f.k)?.focus();
+  }
+
+  /** Updates Uložit and its reason in place (a rebuild would drop the focus). */
+  _patchSave() {
+    const ed = this._ed, root = this.shadowRoot;
+    const btn = root.querySelector('[data-a="save"]'), why = root.querySelector('.why');
+    if (!btn || !why) return;
+    const block = this._saveBlock(ed);
+    btn.disabled = !!(block || ed.stale || this._busy.has('ed'));
+    why.textContent = block;
+  }
+
+  _editorHtml(dark, errHtml) {
+    const ed = this._ed, step = this._cfg.timeStep, states = this._hass?.states ?? {};
+    const sl = ed.slots, cur = sl[ed.sel], last = sl.length - 1;
+    const names = this._programs().list;
+    const valveTitle = ed.valves.map((v) => states[v]?.attributes?.friendly_name || v).join(', ');
+    const progName = names.find((p) => p.id === ed.program)?.name || ed.program;
+    const block = this._saveBlock(ed), busy = this._busy.has('ed');
+    const btn = (a, label, svg, dis = false) => `<button type="button" class="step" data-a="${a}" data-k="" aria-label="${label}" ${dis ? 'disabled' : ''}>${svg}</button>`;
+    const stepTile = (label, value, dn, up, canMove) => `<div class="ttile"><div><span class="sec">${label}</span><b>${fmtTime(value)}</b></div>
+      <div class="pair">${btn(dn, `${label} o ${step} minut dřív`, icon('minus', 18), !canMove)}${btn(up, `${label} o ${step} minut později`, icon('plus', 18), !canMove)}</div></div>`;
+    const carry = sl[0].start > 0 ? `<span class="edseg carry" style="flex:${sl[0].start} 1 0" aria-label="Od půlnoci do ${fmtTime(sl[0].start)} platí rozvrh z předchozího dne">${sl[0].start >= 150 ? 'z předchozího dne' : ''}</span>` : '';
+    const segs = carry + sl.map((x, n) => `<button type="button" class="edseg" data-a="sel" data-k="${n}" style="flex:${x.end - x.start} 1 0;--c:${tempColor(x.temp, dark)}" aria-pressed="${n === ed.sel}"
+      aria-label="Úsek ${fmtTime(x.start)}–${fmtTime(x.end)}, ${fmtTemp(x.temp)} °C">${x.end - x.start >= 90 ? `${fmtTemp(x.temp)}°` : ''}</button>`).join('');
+    const pos = (m) => `calc(5px + (100% - 10px) * ${(m / DAY_END).toFixed(4)})`;
+    const handles = sl.filter((x) => x.start > 0).map((x) => `<span class="handle" style="left:${pos(x.start)}"></span>`).join('');
+    const hlabels = sl.filter((x) => x.start > 0).map((x) => `<span style="left:${pos(x.start)}">${Math.floor(x.start / 60)}:${pad(x.start % 60)}</span>`).join('');
+    const daysHtml = DAYS.map((d) => `<button type="button" class="day" data-a="day" data-k="${d}" aria-pressed="${ed.days.includes(d)}">${DAY_LABELS[d]}</button>`).join('');
+    return `<div class="head">
+        <button type="button" class="round" data-a="back" data-k="" aria-label="Zpět" ${busy ? 'disabled' : ''}>${icon('chevronLeft')}</button>
+        <div class="t"><span class="sec">${esc(valveTitle)} · ${esc(progName)}</span><span class="title">${ed.existing ? 'Upravit rozvrh' : 'Nový rozvrh'}</span></div>
+        ${ed.existing ? `<button type="button" class="round" data-a="copy" data-k="" aria-label="Kopírovat tento rozvrh">${icon('contentCopy')}</button>
+        <button type="button" class="round" data-a="del" data-k="" aria-label="Smazat rozvrh" ${busy ? 'disabled' : ''}>${icon('deleteOutline')}</button>` : ''}
+      </div>
+      ${ed.confirm ? `<div class="confirm" role="alertdialog" aria-label="Smazat rozvrh"><span>Smazat rozvrh ${esc(daysLabel(ed.existing?.days ?? ed.days))}?</span>
+        <button type="button" class="btn small" data-a="delno" data-k="">Zrušit</button><button type="button" class="btn small danger" data-a="delok" data-k="" ${busy ? 'disabled' : ''}>Smazat</button></div>` : ''}
+      ${errHtml}
+      ${ed.stale ? '<div class="err stale" role="alert"><span>Rozvrh se mezitím změnil</span><button type="button" class="btn small" data-a="reload" data-k="">Načíst znovu</button></div>' : ''}
+      <div class="col"><span class="label">Dny</span><div class="days">${daysHtml}</div></div>
+      <div class="col"><span class="label">Průběh dne</span><div class="edbar">${segs}${handles}</div><div class="hlabels">${hlabels}</div></div>
+      <div class="panel">
+        <div class="l"><span class="label">Úsek ${fmtTime(cur.start)}–${fmtTime(cur.end)}</span>
+          ${stepTile('Začátek', cur.start, 'sdn', 'sup', ed.sel > 0 || cur.start > 0)}${stepTile('Konec', cur.end, 'edn', 'eup', ed.sel < last)}
+          <div class="grid2">
+            <button type="button" class="btn small" data-a="split" data-k="" ${cur.end - cur.start >= 2 * step ? '' : 'disabled'}><span style="color:var(--c-accent);display:inline-flex">${icon('split', 18)}</span>Rozdělit</button>
+            <button type="button" class="btn small" data-a="rm" data-k="" ${sl.length > 1 ? '' : 'disabled'}><span style="color:var(--c-accent);display:inline-flex">${icon('deleteOutline', 18)}</span>Smazat</button>
+          </div>
+        </div>
+        <div class="r">${this._dialHtml(cur.temp, dark)}
+          <div class="pair">${btn('tdn', 'Snížit teplotu', icon('minus'), cur.temp <= TEMP_MIN)}${btn('tup', 'Zvýšit teplotu', icon('plus'), cur.temp >= TEMP_MAX)}</div>
+        </div>
+      </div>
+      <span class="why" role="status">${esc(block)}</span>
+      <div class="grid2">
+        <button type="button" class="btn wide" data-a="back" data-k="c" ${busy ? 'disabled' : ''}>Zrušit</button>
+        <button type="button" class="btn primary wide" data-a="save" data-k="" ${block || busy || ed.stale ? 'disabled' : ''}>${icon('check')}Uložit</button>
+      </div>`;
+  }
+
+  /** The Bento dial of the canvas: 270° ring of ticks over 15–25 °C, knob at the value, the value in the face. */
+  _dialHtml(temp, dark) {
+    const S = 188, ctr = S / 2, kr = ctr - 10, sweep = 270;
+    const t = Math.min(25, Math.max(15, temp));
+    const f = (t - 15) / 10, sp = (f * sweep).toFixed(1);
+    const stops = dark ? STOPS_DARK : STOPS;
+    const grad = stops.map((h, n) => `${h} ${(n / (stops.length - 1) * sweep).toFixed(1)}deg`).join(', ');
+    const ring = (w, o = 0) => `radial-gradient(closest-side, transparent calc(100% - ${o + w}px), #000 calc(100% - ${o + w - 1}px), #000 calc(100% - ${o}px), transparent calc(100% - ${o}px))`;
+    const bg = `conic-gradient(from 225deg, transparent 0deg ${sp}deg, var(--c-border) ${sp}deg ${sweep}deg, transparent ${sweep}deg), conic-gradient(from 225deg, ${grad}, transparent ${sweep}deg)`;
+    const mask = (m, w, o) => `-webkit-mask: ${m}, ${ring(w, o)}; -webkit-mask-composite: source-in; mask: ${m}, ${ring(w, o)}; mask-composite: intersect`;
+    const ang = (225 + f * sweep) * Math.PI / 180, kx = ctr + kr * Math.sin(ang), ky = ctr - kr * Math.cos(ang), kc = tempColor(t, dark);
+    return `<div class="dial" role="img" aria-label="Teplota ${fmtTemp(temp)} °C">
+      <div class="ring" style="background:${bg};${mask('repeating-conic-gradient(from 224.5deg, #000 0deg 1deg, transparent 1deg 3.6deg)', 9, 4)}"></div>
+      <div class="ring" style="background:${bg};${mask('repeating-conic-gradient(from 224deg, #000 0deg 2deg, transparent 2deg 18deg)', 17, 0)}"></div>
+      <div class="face"><span class="sec">Teplota</span><b>${fmtTemp(temp)}<small>°C</small></b></div>
+      <span class="knob2" style="left:${(kx - 11).toFixed(1)}px;top:${(ky - 11).toFixed(1)}px;background:radial-gradient(circle, ${kc} 0 3px, var(--c-card) 3.5px);border:2px solid ${kc}"></span>
+      <span class="lim" style="left:${Math.round(S * 0.19)}px">15°</span><span class="lim" style="right:${Math.round(S * 0.19)}px">25°</span></div>`;
+  }
+
+  _pickerHtml(list, errHtml) {
+    const pick = this._pick, states = this._hass?.states ?? {};
+    const names = Object.fromEntries(list.map((p) => [p.id, p.name]));
+    const seen = new Set(); // a climate listed in two circuits is one tile
+    const tile = (v) => {
+      if (seen.has(v)) return '';
+      seen.add(v);
+      const on = pick.valves.includes(v);
+      const groups = [...groupByProgram(this._schedules, v)].filter(([, g]) => g.length);
+      const n = groups.reduce((a, [, g]) => a + g.length, 0);
+      const sub = n ? `${plural(n, 'rozvrh', 'rozvrhy', 'rozvrhů')} · ${groups.map(([id]) => names[id] || id).join(', ')}` : 'bez rozvrhu';
+      return `<button type="button" class="tile" data-a="pv" data-k="${esc(v)}" aria-pressed="${on}"><span class="tic">${icon(on ? 'checkCircle' : 'fire', 18)}</span>
+        <span class="tx"><b>${esc(states[v]?.attributes?.friendly_name || v)}</b><span class="sec">${esc(sub)}</span></span></button>`;
+    };
+    const circuits = this._cfg.circuits.map((c) => `<div class="col"><span class="label">${esc(circuitName(this._hass, c))}</span><div class="grid2">${c.valves.map(tile).join('')}</div></div>`).join('');
+    const n = pick.valves.length;
+    return `<div class="head">
+        <button type="button" class="round" data-a="back" data-k="" aria-label="Zpět">${icon('chevronLeft')}</button>
+        <div class="t"><span class="sec">Nový rozvrh · krok 1 ze 2</span><span class="title">Pro které hlavice?</span></div>
+      </div>
+      ${errHtml}
+      <label class="tile sel"><span class="tx"><span class="sec">Program</span><b>${esc(names[pick.program] || pick.program)}</b></span>${icon('chevronDown')}
+        <select data-a="pickprog" aria-label="Program">${list.map((p) => `<option value="${esc(p.id)}"${p.id === pick.program ? ' selected' : ''}>${esc(p.name)}</option>`).join('')}</select></label>
+      ${circuits}
+      <div class="grid2">
+        <button type="button" class="btn wide" data-a="back" data-k="c">Zrušit</button>
+        <button type="button" class="btn primary wide" data-a="go" data-k="" ${n ? '' : 'disabled'}>Pokračovat (${n})</button>
+      </div>`;
   }
 }
 
