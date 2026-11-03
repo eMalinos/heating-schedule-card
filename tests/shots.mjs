@@ -1,4 +1,4 @@
-// Screenshot pages for tests/dom.html?shot=week|fallback|states|editor|picker|copy-valve|copy-one (&dark=1, &w=<px>): the canvas data (Main2.dc.html) in a
+// Screenshot pages for tests/dom.html?shot=week|fallback|states|editor|picker|copy-valve|copy-one|week3|editor3|programs|settings (&dark=1, &w=<px>): the canvas data (Main2.dc.html) in a
 // fake hass with a fixed clock (Monday 14:20), to compare the card with the artboards by eye.
 const q = new URLSearchParams(location.search);
 const shot = q.get('shot'), dark = q.has('dark'), width = Number(q.get('w')) || 580;
@@ -12,8 +12,8 @@ await import('../dist/heating-schedule-card.js');
 
 const V = 'climate.living_valve', C = 'heating_circuit_1';
 const t = (h) => `${String(Math.floor(h)).padStart(2, '0')}:${String(Math.round((h % 1) * 60)).padStart(2, '0')}:00`;
-const item = (id, weekdays, program, slots, valve = V) => ({
-  schedule_id: id, entity_id: `switch.schedule_${id}`, weekdays, repeat_type: 'repeat', tags: [`program:${program}`], name: null,
+const item = (id, weekdays, program, slots, valve = V, tags = []) => ({
+  schedule_id: id, entity_id: `switch.schedule_${id}`, weekdays, repeat_type: 'repeat', tags: [`program:${program}`, ...tags], name: null,
   timeslots: slots.map(([a, b, temp]) => ({ start: t(a), stop: b === 24 ? '23:59:00' : t(b), conditions: [], actions: [{ service: 'climate.set_temperature', entity_id: valve, service_data: { temperature: temp } }] })),
 });
 const ITEMS = [
@@ -104,4 +104,37 @@ const copyShot = async (pre) => {
 };
 if (shot === 'copy-valve') await copyShot((q) => { q('[data-a="cp-pt"][data-k="vacation"]').click(); });
 else if (shot === 'copy-one') await copyShot((q) => { q('[data-a="cp-mode"][data-k="one"]').click(); q('[data-a="cp-row"][data-k="a1"]').click(); });
+// v3 (Main3.dc.html): Výchozí has odd / even Po–Pá schedules (the alternation is on, Monday 2026-11-02 is an odd week), programs Dovolená + Chata
+const WKD = ['mon', 'tue', 'wed', 'thu', 'fri'];
+const V3 = [
+  item('o1', WKD, 'auto', [[0, 6, 18], [6, 8, 21.5], [8, 16, 19], [16, 22, 21.5], [22, 24, 18]], V, ['week:odd']),
+  item('e1', WKD, 'auto', [[0, 5.5, 18], [5.5, 7.5, 21.5], [7.5, 15, 19.5], [15, 22.5, 21.5], [22.5, 24, 18]], V, ['week:even']),
+  item('a2', ['sat', 'sun'], 'auto', [[0, 7.5, 18], [7.5, 23, 21], [23, 24, 18]]),
+  item('v1', ['daily'], 'vacation', [[0, 24, 16]]),
+];
+const V3STATES = (hol = 'cz') => ({
+  [`sensor.heating_program_${C}`]: { state: 'auto', attributes: { programs: ['auto', 'vacation', 'chata'], program_names: { auto: 'Výchozí', vacation: 'Dovolená', chata: 'Chata' } } },
+  [`sensor.heating_programs_${C}`]: { state: '2', attributes: { programs: [{ id: 'vacation', name: 'Dovolená' }, { id: 'chata', name: 'Chata' }], holiday_dates: [], holiday_error: null } },
+  [`input_boolean.heating_week_alternation_${C}`]: { state: 'on', attributes: {} },
+  [`input_select.heating_holidays_${C}`]: { state: hol, attributes: {} },
+  [`input_text.heating_holiday_calendar_${C}`]: { state: '', attributes: {} },
+  [`sensor.heating_schedule_${C}`]: { state: 'auto', attributes: { targets: { [V]: 19 }, week: 'odd', week_number: 45, holiday_today: false,
+    holidays_next: [['2026-11-17', 'Den boje za svobodu a demokracii'], ['2026-12-24', 'Štědrý den'], ['2026-12-25', '1. svátek vánoční'], ['2026-12-26', '2. svátek vánoční']].map(([date, name]) => ({ date, name })) } },
+});
+if (shot === 'week3') { items = V3; await mk('', V3STATES()); }
+else if (shot === 'editor3') { // Editor3: Po–Pá lichý, the 16:00–22:00 slot selected
+  items = V3;
+  const c = await mk('', V3STATES());
+  c.shadowRoot.querySelector('.row [data-a="open"]').click();
+  c.shadowRoot.querySelector('[data-a="sel"][data-k="3"]').click();
+} else if (shot === 'programs') { // Programs3
+  items = [...V3, item('c1', WKD, 'vacation', [[0, 24, 16]], 'climate.kitchen_valve'), item('c2', ['sat', 'sun'], 'vacation', [[0, 24, 16]], 'climate.kitchen_valve')];
+  const c = await mk('', V3STATES());
+  c.shadowRoot.querySelector('.chip.add').click();
+} else if (shot === 'settings') { // Settings3 (&cal=1: SettingsCal3)
+  items = V3;
+  const cal = q.has('cal');
+  const c = await mk('', { ...V3STATES(cal ? 'calendar' : 'cz'), ...(cal ? { 'calendar.slovakia': { state: 'off', attributes: {} }, [`input_text.heating_holiday_calendar_${C}`]: { state: 'calendar.slovakia', attributes: {} } } : {}) });
+  c.shadowRoot.querySelector('[data-a="cog"]').click();
+}
 document.title = `shot ${shot}`;

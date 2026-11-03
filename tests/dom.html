@@ -48,7 +48,7 @@
     const r = {};
     r.loaded = ws.some((m) => m.type === 'scheduler') && ws.some((m) => m.type === 'scheduler_updated');
     r.title = root.querySelector('.head b').textContent === 'Kuchyň' && root.querySelector('.head .sec').textContent === 'Přízemí';
-    r.programs = [...root.querySelectorAll('.chip')].map((p) => p.textContent).join() === 'Výchozí,Lichý týden,Dovolená'
+    r.programs = [...root.querySelectorAll('.chip:not(.add)')].map((p) => p.textContent).join() === 'Výchozí,Lichý týden,Dovolená'
       && root.querySelector('.chip .dot') && root.querySelector('.chip[aria-pressed="true"]').textContent === 'Výchozí';
     r.rows = root.querySelectorAll('.row').length === 1 && root.querySelector('.open b').textContent === 'Po–Ne'
       && root.querySelector('.seg').textContent === '21°' && root.querySelector('.now').dataset.kind === 'normal';
@@ -701,6 +701,236 @@
     await tick(600);
     r.ownDiscoveredOff = calls35.join() === 'switch.schedule_n1';
     c35.remove();
+
+    // --- v0.2.0: programs, odd / even weeks, holidays ---
+    const M = await import('../dist/heating-schedule-card.js');
+    const now0 = new Date(), par0 = M.weekParity(now0), oth0 = par0 === 'odd' ? 'even' : 'odd', LBL = { odd: 'lichý', even: 'sudý' };
+    const proto = fixture[0].timeslots[0];
+    const mkItem = (id, days, tags, temp = 20, valve = K) => ({ ...fixture[0], schedule_id: id, entity_id: 'switch.schedule_' + id, weekdays: days, tags, name: null,
+      timeslots: [{ ...proto, actions: [{ ...proto.actions[0], entity_id: valve, service_data: { temperature: temp } }] }] });
+    const WK = ['mon', 'tue', 'wed', 'thu', 'fri'], WE = ['sat', 'sun'];
+    const HP = `sensor.heating_programs_${CID}`, ALT = `input_boolean.heating_week_alternation_${CID}`, HOL = `input_select.heating_holidays_${CID}`, CAL = `input_text.heating_holiday_calendar_${CID}`;
+    const progAttr = hass.states['sensor.heating_program_heating_circuit_1'].attributes;
+    // a fake HA: services change the states the way the helpers and the program script do
+    const mkHA = (list, extraStates = {}) => {
+      const A = { items: list, log: [], svc: [], states: {
+        ...hass.states, [K]: { state: 'heat', attributes: { friendly_name: 'Kuchyň', temperature: 21 } },
+        [ALT]: { state: 'on', attributes: {} }, [HOL]: { state: 'cz', attributes: {} }, [CAL]: { state: '', attributes: {} },
+        [HP]: { state: '2', attributes: { programs: [{ id: 'odd', name: 'Lichý týden' }, { id: 'vacation', name: 'Dovolená' }] } },
+        ...extraStates,
+      }, failScript: false };
+      A.hass = {
+        states: A.states, themes: {},
+        callWS: async (m) => (m.type === 'call_service' ? { response: { 'calendar.cz': { events: [{ start: '2026-12-24', summary: 'Štědrý den' }] } } } : A.items),
+        callApi: async (m, path, body) => {
+          A.log.push(path.split('/')[1] + (body.schedule_id ? ':' + body.schedule_id : ''));
+          if (path === 'scheduler/add') A.items = [...A.items, { ...mkItem('n' + A.items.length + A.log.length, body.weekdays, body.tags), timeslots: body.timeslots }];
+          else if (path === 'scheduler/edit') A.items = A.items.map((x) => (x.schedule_id === body.schedule_id ? { ...x, weekdays: body.weekdays, tags: body.tags, timeslots: body.timeslots } : x));
+          else if (path === 'scheduler/remove') A.items = A.items.filter((x) => x.schedule_id !== body.schedule_id);
+        },
+        callService: async (domain, service, data) => {
+          A.svc.push({ domain, service, data });
+          if (domain === 'script') {
+            A.log.push('script');
+            if (A.failScript) throw new Error('script failed');
+            A.states[HP] = { state: String(data.programs.length), attributes: { programs: data.programs } };
+          } else if (domain === 'input_boolean') A.states[ALT] = { state: A.states[ALT].state === 'on' ? 'off' : 'on', attributes: {} };
+          else if (domain === 'input_select') A.states[HOL] = { state: data.option, attributes: {} };
+          else if (domain === 'input_text') A.states[CAL] = { state: data.value, attributes: {} };
+        },
+        connection: { subscribeMessage: async () => () => {} },
+      };
+      return A;
+    };
+    const cfgK = { valve: K, circuits: [{ id: CID, valves: [K, BD] }] };
+    const text = (c, sel) => c.shadowRoot.querySelector(sel)?.textContent.trim();
+    const setVal = (c, sel, v) => { const el = c.shadowRoot.querySelector(sel); el.value = v; el.dispatchEvent(new Event('input', { bubbles: true })); };
+    const DAYS7 = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
+
+    // week view: badge with the parity and ISO week while the alternation is on, a pill per tagged row, rows of the other week dimmed
+    let A = mkHA([mkItem('wo', WK, ['program:auto', 'week:odd'], 18), mkItem('we', WK, ['program:auto', 'week:even'], 22), mkItem('wd', WE, ['program:auto'], 20)]);
+    let cw = await mkCard(A.hass, cfgK);
+    const pillsOf = (c) => [...c.shadowRoot.querySelectorAll('.row .rep')].map((x) => x.textContent).join();
+    r.v2Badge = text(cw, '.wbadge') === `${LBL[par0]} týden (${M.isoWeek(now0)}.)`;
+    r.v2Pills = pillsOf(cw) === 'lichý,sudý' && cw.shadowRoot.querySelectorAll('.row').length === 3;
+    r.v2Dim = cw.shadowRoot.querySelectorAll('.row.offweek').length === 1 && cw.shadowRoot.querySelector('.row.offweek .rep').textContent === LBL[oth0];
+    A.states[ALT] = { state: 'off', attributes: {} };
+    cw.hass = { ...A.hass };
+    r.v2NoBadgeOff = !cw.shadowRoot.querySelector('.wbadge') && pillsOf(cw) === 'lichý,sudý'; // the tags count whatever the switch says
+    r.v2AddChip = text(cw, '.chip.add') === 'Program' && !!cw.shadowRoot.querySelector('[data-a="cog"]');
+    cw.remove();
+
+    // a holiday today: the now tile says so (a calendar holiday, today's date)
+    A = mkHA([mkItem('hs', ['sun'], ['program:auto'], 17), mkItem('hw', DAYS7.filter((d) => d !== 'sun'), ['program:auto'], 21)],
+      { [HOL]: { state: 'calendar', attributes: {} }, [HP]: { state: '0', attributes: { programs: [], holiday_dates: [M.ymd(now0)] } } });
+    cw = await mkCard(A.hass, cfgK);
+    r.v2Holiday = text(cw, '.now .tx .sec') === 'Svátek · podle neděle' && text(cw, '.now .big').startsWith('17');
+    cw.remove();
+
+    // editor: day presets, Opakování tabs, the week tag written and kept
+    A = mkHA([mkItem('we', WK, ['program:auto', 'week:even'], 22)]);
+    cw = await mkCard(A.hass, cfgK);
+    click(cw, '.row [data-a="open"]');
+    const sr2 = cw.shadowRoot;
+    r.v2EdTabs = [...sr2.querySelectorAll('[data-a="wk"]')].map((x) => x.textContent).join() === 'Každý týden,Lichý,Sudý' && sr2.querySelector('[data-a="wk"][aria-pressed="true"]').dataset.k === 'even';
+    click(cw, '[data-a="preset"][data-k="weekend"]');
+    r.v2Preset = sr2.querySelectorAll('.day[aria-pressed="true"]').length === 2 && sr2.querySelector('.day[data-k="sat"]').getAttribute('aria-pressed') === 'true';
+    click(cw, '[data-a="preset"][data-k="all"]');
+    r.v2PresetAll = sr2.querySelectorAll('.day[aria-pressed="true"]').length === 7;
+    click(cw, '[data-a="preset"][data-k="workday"]');
+    click(cw, '[data-a="wk"][data-k="odd"]');
+    click(cw, '[data-a="save"]');
+    await tick(150);
+    r.v2EdSave = A.log.join() === 'edit:we' && A.items[0].tags.join() === 'program:auto,week:odd';
+    // a new schedule for the same days in the other week is no conflict, every week is
+    click(cw, '[data-a="add"]');
+    click(cw, '[data-a="preset"][data-k="workday"]');
+    click(cw, '[data-a="wk"][data-k="even"]');
+    const noConflict = !sr2.querySelector('[data-a="save"]').disabled;
+    click(cw, '[data-a="wk"][data-k="odd"]');
+    const conflict = sr2.querySelector('[data-a="save"]').disabled && sr2.querySelector('.why').textContent.includes('už má jiný rozvrh');
+    click(cw, '[data-a="wk"][data-k="all"]');
+    r.v2Conflict = noConflict && conflict && sr2.querySelector('[data-a="save"]').disabled;
+    click(cw, '[data-a="wk"][data-k="even"]');
+    A.log.length = 0;
+    click(cw, '[data-a="save"]');
+    await tick(150);
+    r.v2NewSave = A.log.join() === 'add' && A.items.length === 2 && A.items[1].tags.includes('week:even') && A.items[1].tags.includes('program:auto');
+    cw.remove();
+    // alternation off: an existing tag is shown read-only and kept; no tabs; a new schedule has no tag
+    A = mkHA([mkItem('we', WK, ['program:auto', 'week:even'], 22)], { [ALT]: { state: 'off', attributes: {} } });
+    cw = await mkCard(A.hass, cfgK);
+    click(cw, '.row [data-a="open"]');
+    r.v2EdOff = !cw.shadowRoot.querySelector('[data-a="wk"]') && text(cw, '.repro') === 'sudý týden · střídání je vypnuté';
+    click(cw, '[data-a="day"][data-k="sat"]');
+    click(cw, '[data-a="save"]');
+    await tick(150);
+    r.v2EdOffKept = A.items[0].tags.includes('week:even') && A.items[0].weekdays.includes('sat');
+    click(cw, '[data-a="add"]');
+    r.v2NewOff = !cw.shadowRoot.querySelector('.repro') && !cw.shadowRoot.querySelector('[data-a="wk"]');
+    cw.remove();
+
+    // settings: the alternation switch, holiday tabs, the calendar picker, the next holidays
+    A = mkHA([mkItem('wd', DAYS7, ['program:auto'], 20)], {
+      [HOL]: { state: 'none', attributes: {} }, 'calendar.cz': { state: 'off', attributes: {} },
+      [`sensor.heating_schedule_${CID}`]: { state: 'auto', attributes: { targets: { [K]: 20 }, holidays_next: [{ date: '2026-12-24', name: 'Štědrý den' }, { date: '2026-12-25', name: null }] } },
+    });
+    cw = await mkCard(A.hass, cfgK);
+    click(cw, '[data-a="cog"]');
+    const sr3 = cw.shadowRoot;
+    r.v2Settings = sr3.textContent.includes('Nastavení rozvrhů') && sr3.querySelector('.switch').getAttribute('aria-checked') === 'true'
+      && sr3.querySelector('.tab[aria-pressed="true"]').textContent === 'Žádné' && !sr3.querySelector('.hols') && sr3.textContent.includes('Výchozí, Lichý týden, Dovolená');
+    click(cw, '.switch');
+    cw.hass = { ...A.hass };
+    await tick(50);
+    r.v2Alt = JSON.stringify(A.svc) === JSON.stringify([{ domain: 'input_boolean', service: 'toggle', data: { entity_id: ALT } }]);
+    A.svc.length = 0;
+    click(cw, '.tab[data-k="cz"]');
+    await tick(50);
+    cw.hass = { ...A.hass };
+    r.v2Hol = JSON.stringify(A.svc) === JSON.stringify([{ domain: 'input_select', service: 'select_option', data: { entity_id: HOL, option: 'cz' } }])
+      && sr3.querySelector('.tab[aria-pressed="true"]').textContent === 'České'
+      && [...sr3.querySelectorAll('.hols .h')].map((x) => x.textContent).join('|') === '24. 12.Štědrý den|25. 12.' && sr3.textContent.includes('ve svátek se jede podle rozvrhu neděle');
+    A.svc.length = 0;
+    A.states['sensor.heating_schedule_' + CID] = { state: 'auto', attributes: { targets: { [K]: 20 }, holidays_next: [{ date: '2026-12-24', name: null }, { date: '2026-12-25', name: null }] } };
+    click(cw, '.tab[data-k="calendar"]');
+    await tick(100);
+    cw.hass = { ...A.hass };
+    const calSel = sr3.querySelector('select[data-a="st-cal"]');
+    r.v2CalPicker = !!calSel && [...calSel.options].map((o) => o.value).join() === ',calendar.cz' && sr3.textContent.includes('Kalendář přidáte integrací Holiday');
+    calSel.value = 'calendar.cz';
+    calSel.dispatchEvent(new Event('change', { bubbles: true }));
+    await tick(150);
+    cw.hass = { ...A.hass };
+    r.v2Cal = A.svc.some((x) => x.domain === 'input_text' && x.data.entity_id === CAL && x.data.value === 'calendar.cz')
+      && [...sr3.querySelectorAll('.hols .h')].map((x) => x.textContent).join('|') === '24. 12.Štědrý den|25. 12.'; // 25. 12. has no event: blank
+    click(cw, '[data-a="st-back"]');
+    r.v2SettingsBack = !!cw.shadowRoot.querySelector('.now');
+    click(cw, '[data-a="cog"]');
+    click(cw, '[data-a="st-prog"]');
+    r.v2ProgFromSettings = cw.shadowRoot.textContent.includes('Programy') && !!cw.shadowRoot.querySelector('#newprog');
+    click(cw, '[data-a="pg-back"]');
+    r.v2ProgBackToSettings = cw.shadowRoot.textContent.includes('Nastavení rozvrhů');
+    cw.remove();
+
+    // programs view: validation, add, rename, delete with its schedules
+    A = mkHA([mkItem('a1', DAYS7, ['program:auto'], 20), mkItem('c1', WK, ['program:chata'], 18), mkItem('c2', WE, ['program:chata'], 19), mkItem('x1', DAYS7, ['program:vacation'], 16, BD)],
+      { [HP]: { state: '3', attributes: { programs: [{ id: 'odd', name: 'Lichý týden' }, { id: 'vacation', name: 'Dovolená' }, { id: 'chata', name: 'Chata' }] } } });
+    cw = await mkCard(A.hass, cfgK);
+    click(cw, '.chip.add');
+    const sr4 = cw.shadowRoot;
+    r.v2Prog = [...sr4.querySelectorAll('.prow b')].map((x) => x.textContent).join() === 'Výchozí,Lichý týden,Dovolená,Chata'
+      && sr4.querySelector('.prow .sec').textContent.includes('platí, když program nemá svůj')
+      && [...sr4.querySelectorAll('.prow .sec')].some((x) => x.textContent === '1 hlavice · 2 rozvrhy')
+      && [...sr4.querySelectorAll('.prow .sec')].some((x) => x.textContent === 'zatím bez rozvrhů · jede podle Výchozího')
+      && !sr4.querySelector('[data-a="pg-ren"][data-k="auto"]') && sr4.querySelector('[data-a="pg-add"]').disabled;
+    for (const [v, msg] of [['Výchozí', 'Výchozí je vyhrazený název'], ['dovolená', 'Program s tímto názvem už existuje'], ['???', 'Název musí obsahovat písmeno nebo číslici']]) {
+      setVal(cw, '#newprog', v);
+      r['v2Msg_' + v] = text(cw, '[data-pg="msg"]') === msg && sr4.querySelector('[data-a="pg-add"]').disabled;
+    }
+    setVal(cw, '#newprog', 'Hytta u lesa');
+    r.v2MsgOk = text(cw, '[data-pg="msg"]') === '' && !sr4.querySelector('[data-a="pg-add"]').disabled;
+    click(cw, '[data-a="pg-add"]');
+    await tick(400);
+    r.v2Add = A.svc.length === 1 && A.svc[0].domain === 'script' && A.svc[0].service === `heating_programs_set_${CID}`
+      && JSON.stringify(A.svc[0].data.programs.at(-1)) === '{"id":"hytta_u_lesa","name":"Hytta u lesa"}' && A.svc[0].data.programs.length === 4
+      && [...cw.shadowRoot.querySelectorAll('.prow b')].map((x) => x.textContent).includes('Hytta u lesa') && cw.shadowRoot.querySelector('#newprog').value === '';
+    // rename: the id stays
+    A.svc.length = 0;
+    click(cw, '[data-a="pg-ren"][data-k="vacation"]');
+    setVal(cw, '[data-a="pg-rtext"]', 'Chata');
+    r.v2RenameMsg = text(cw, '[data-pg="rmsg"]') === 'Program s tímto názvem už existuje' && cw.shadowRoot.querySelector('[data-a="pg-rok"]').disabled;
+    setVal(cw, '[data-a="pg-rtext"]', 'Dovolená 2');
+    click(cw, '[data-a="pg-rok"]');
+    await tick(400);
+    r.v2Rename = A.svc.length === 1 && A.svc[0].data.programs.map((p) => p.id + ':' + p.name).join() === 'odd:Lichý týden,vacation:Dovolená 2,chata:Chata,hytta_u_lesa:Hytta u lesa';
+    // delete asks first and names the schedules; the schedules go first, then the list entry
+    A.svc.length = 0; A.log.length = 0;
+    click(cw, '[data-a="pg-del"][data-k="chata"]');
+    r.v2DelAsk = text(cw, '.confirm span') === 'Smazat program Chata a jeho 2 rozvrhy?' && A.log.length === 0;
+    click(cw, '[data-a="pg-delno"]');
+    r.v2DelNo = !cw.shadowRoot.querySelector('.confirm') && A.log.length === 0;
+    click(cw, '[data-a="pg-del"][data-k="chata"]');
+    click(cw, '[data-a="pg-delok"]');
+    await tick(500);
+    r.v2Del = A.log.join() === 'remove:c1,remove:c2,script' && !A.items.some((x) => x.tags.includes('program:chata')) && A.items.length === 2
+      && !A.svc[0].data.programs.some((p) => p.id === 'chata') && ![...cw.shadowRoot.querySelectorAll('.prow b')].some((x) => x.textContent === 'Chata');
+    // a failing list write puts the removed schedules back (own writes only), shows the error and keeps the list
+    A.items = [...A.items, mkItem('c3', WK, ['program:hytta_u_lesa'], 18), mkItem('c4', WE, ['program:hytta_u_lesa'], 19)];
+    cw.hass = { ...A.hass };
+    await cw._load();
+    A.failScript = true; A.log.length = 0;
+    click(cw, '[data-a="pg-del"][data-k="hytta_u_lesa"]');
+    click(cw, '[data-a="pg-delok"]');
+    await tick(500);
+    r.v2DelRollback = A.log.join() === 'remove:c3,remove:c4,script,add,add' && A.items.filter((x) => x.tags.includes('program:hytta_u_lesa')).length === 2
+      && cw.shadowRoot.textContent.includes('Chyba: script failed') && [...cw.shadowRoot.querySelectorAll('.prow b')].map((x) => x.textContent).includes('Hytta u lesa');
+    // a program with a read-only schedule is not deleted from the card
+    A.failScript = false;
+    A.items = [...A.items, { ...mkItem('ro1', WK, ['program:vacation']), repeat_type: 'single' }];
+    await cw._load();
+    A.log.length = 0;
+    click(cw, '[data-a="pg-del"][data-k="vacation"]');
+    r.v2DelRo = text(cw, '.confirm span').includes('jen ke čtení') && !cw.shadowRoot.querySelector('[data-a="pg-delok"]') && A.log.length === 0;
+    click(cw, '[data-a="pg-delno"]');
+    // the schedules changed since the confirmation: nothing is written
+    click(cw, '[data-a="pg-del"][data-k="hytta_u_lesa"]');
+    A.items = A.items.filter((x, i, all) => i !== all.findIndex((y) => y.tags.includes('program:hytta_u_lesa')));
+    A.log.length = 0;
+    click(cw, '[data-a="pg-delok"]');
+    await tick(300);
+    r.v2DelStale = A.log.length === 0 && cw.shadowRoot.textContent.includes('Rozvrhy se mezitím změnily');
+    cw.remove();
+    // the list write never shows up in the states: an error, nothing else
+    A = mkHA([], { [HP]: { state: '0', attributes: { programs: [] } } });
+    A.hass.callService = async (d, s, data) => { A.svc.push({ d, s, data }); };
+    cw = await mkCard(A.hass, cfgK);
+    click(cw, '.chip.add');
+    setVal(cw, '#newprog', 'Chata');
+    click(cw, '[data-a="pg-add"]');
+    await tick(6500);
+    r.v2NoReadBack = cw.shadowRoot.textContent.includes('Chyba: Seznam programů se neuložil');
+    cw.remove();
 
     r.noErrors = errors.length === 0;
     const ok = Object.values(r).every(Boolean);
