@@ -2,7 +2,15 @@
 
 A Home Assistant card for the weekly heating schedules of climate valves, written in Czech. Schedules are stored by [scheduler-component](https://github.com/nielsfaber/scheduler-component) (no own integration); the card reads them, shows what a valve does now and writes `scheduler/add`, `edit` and `remove`. The schedule switches stay **off**: the heating automation alone decides what a valve gets.
 
-Status: week view (now tile with the heating automation's state, program chips, temperature-coloured 24 h bars, fallback to Výchozí, per-schedule "Aktivní" pause) and the schedule editor (weekdays, 24 h bar with selectable slots, start / end ± `time_step`, split / delete slot, Bento dial ±0.5 °C, save / cancel / delete; a card without `valve` first asks for which valves a new schedule is made) on the data layer (v0.1.0 in progress). Copy to other valves (whole valve or selected schedules, Nahradit / Jen doplnit, with a per-valve preview).
+## Features
+
+- **Week view**: a "now" tile (current setpoint, next change, the state the heating automation reports), program chips, one temperature-coloured 24 h bar per weekday group, and a per-schedule "Aktivní" pause.
+- **Editor**: weekdays, a 24 h bar with selectable slots, start / end +/- `time_step`, split / delete a slot, a Bento dial in 0.5 degree steps. A card without `valve` first asks for which valves a new schedule is made.
+- **Copy to other valves**: a whole valve or selected schedules, Nahradit / Jen doplnit, with a per-valve preview.
+
+![Week view](docs/week.png)
+![Editor](docs/editor.png)
+![Copy](docs/copy.png)
 
 ## Installation
 
@@ -22,15 +30,18 @@ circuits:                           # required: circuits whose valves can be pic
 time_step: 15                       # optional, minutes (divisor of 1440)
 ```
 
-## Schedule model
+## How it works with the heating feature
 
-One scheduler-component schedule = one program's weekdays with timeslots covering 00:00–24:00, one `climate.set_temperature` action each.
+The card only stores schedules in scheduler-component; it never controls a valve itself.
 
-- program = tag `program:<id>`; none = `auto` (Výchozí)
-- paused = tag `paused`
-- a schedule the card cannot represent (not `repeat`, conditions, other actions, several valves, sun times, gaps) is shown read-only and never written
+- The schedule switches stay **off** (the heating feature keeps them off). Node-RED reads the schedules and applies the slots to the valves at every slot start, so the scheduler never fires.
+- **Programs** come from the heating feature's `programs` parameter (`sensor.heating_program_<circuit>`: `programs` and `program_names`); Výchozí (`auto`) is always first. The chips show them, a schedule's program is its tag `program:<id>` (none = `auto`).
+- **Fallback**: a program with no schedule for a weekday uses the Výchozí schedule of that day, per day (same rules as the heating feature's `heating_slot_temp`). A program without schedules shows "používá výchozí rozvrh" and can be given its own copy of the Výchozí schedules.
+- **Pause**: the tag `paused` (the "Aktivní" toggle) removes a schedule from the heating without deleting it.
+- **Copy** writes new schedules for the target valves, tagged with the same program; a target valve whose circuit lacks the program is skipped.
+- A schedule the card cannot represent (not `repeat`, conditions, other actions, several valves, sun times, gaps) is shown read-only and never written.
 
-A day uses the running program's non-paused schedules, else `auto`'s (same rules as the heating feature's `heating_slot_temp`).
+One scheduler-component schedule = one program's weekdays with timeslots covering 00:00-24:00, one `climate.set_temperature` action each.
 
 ## Events
 
