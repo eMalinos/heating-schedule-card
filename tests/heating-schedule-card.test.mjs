@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
   normalizeConfig, circuitName, parseSchedule, toPayload, effective, slotAt, groupByProgram, daysLabel, tempColor, fmtTemp, fmtTime,
-  loadSchedules, saveSchedule, removeSchedule,
+  loadSchedules, saveSchedule, removeSchedule, nowState, isFallbackProgram, barSegments, slotsSummary,
 } from '../dist/heating-schedule-card.js';
 
 process.env.TZ = 'Europe/Prague'; // the DST test needs a zone with a spring-forward day
@@ -271,4 +271,87 @@ test('toPayload: keeps name and start / end date, only owned fields change', () 
 test('toPayload: last stop 23:59, others = next start', () => {
   const m = { valve: V, program: 'auto', days: ['mon'], slots: [{ start: 360, end: 1080, temp: 21 }, { start: 1080, end: 1440, temp: 20 }] };
   assert.deepEqual(toPayload(m).timeslots.map((t) => [t.start, t.stop]), [['06:00:00', '18:00:00'], ['18:00:00', '23:59:00']]);
+});
+
+// ---------- week view ----------
+
+const C = 'c1';
+const AUTO = sched(THREE); // 18 until 06:00, 21 until 20:00, 19 after; every day
+const states = (o = {}) => ({
+  [`sensor.heating_applying_${C}`]: { state: 'idle', attributes: { left: 0 } },
+  [`input_select.heating_mode_${C}`]: { state: 'on' },
+  [`binary_sensor.heating_active_${C}`]: { state: 'on' },
+  [`sensor.heating_off_schedule_${C}`]: { state: '0', attributes: { window_open_climates: [] } },
+  [`sensor.heating_valves_${C}`]: { state: '0', attributes: { phases: { [V]: ['normal', 'x', 21, false] }, forced: [], closed: [] } },
+  [`sensor.heating_schedule_${C}`]: { state: 'auto', attributes: { targets: { [V]: 21 } } },
+  [`sensor.heating_program_${C}`]: { state: 'auto', attributes: { program_names: { auto: 'Výchozí' } } },
+  [V]: { state: 'heat', attributes: { temperature: 21 } },
+  ...o,
+});
+const now = (st, d = at(2026, 11, 2, 14, 20), extra = {}) => nowState({ states: st, circuit: C, valve: V, schedules: [AUTO], program: 'auto', now: d, nValves: 5, ...extra });
+
+test('nowState: normal', () => {
+  const n = now(states());
+  assert.equal(n.kind, 'normal');
+  assert.equal(n.text, 'Teď 21 °C, od 20:00 19 °C');
+  assert.equal(n.sub, 'Běží program Výchozí · Po–Ne');
+  assert.deepEqual([n.temp, n.unit, n.tone, n.muted], ['21', '°C', 21, false]);
+  assert.equal(now(states(), at(2026, 11, 2, 21)).text, 'Teď 19 °C, od zítra 00:00 18 °C');
+});
+
+test('nowState: order applying > off > not heating > window > held > manual > normal', () => {
+  const all = states({
+    [`sensor.heating_applying_${C}`]: { state: 'applying', attributes: { left: 3 } },
+    [`input_select.heating_mode_${C}`]: { state: 'off' },
+    [`binary_sensor.heating_active_${C}`]: { state: 'off' },
+    [`sensor.heating_off_schedule_${C}`]: { state: '1', attributes: { window_open_climates: [V] } },
+    [`sensor.heating_valves_${C}`]: { state: '1', attributes: { phases: { [V]: ['fast'] } } },
+    [V]: { state: 'heat', attributes: { temperature: 23 } },
+  });
+  const a = now(all);
+  assert.deepEqual([a.kind, a.text, a.sub], ['applying', 'Nastavuji hlavice podle rozvrhu', '2 z 5 hotovo · po uložení nebo změně programu']);
+  const step = (st, id, patch) => ({ ...st, [id]: patch });
+  const s1 = step(all, `sensor.heating_applying_${C}`, { state: 'idle' });
+  assert.equal(now(s1).kind, 'off');
+  assert.deepEqual([now(s1).text, now(s1).temp, now(s1).muted], ['Topení je vypnuté', '—', true]);
+  assert.match(now(s1).sub, /teď by bylo 21 °C/);
+  const s2 = step(s1, `input_select.heating_mode_${C}`, { state: 'by_weather' });
+  assert.deepEqual([now(s2).kind, now(s2).text], ['noheat', 'Podle počasí se netopí']);
+  const s3 = step(s2, `binary_sensor.heating_active_${C}`, { state: 'on' });
+  const w = now(s3);
+  assert.deepEqual([w.kind, w.text, w.temp, w.tone], ['window', 'Okno otevřené', '23', 'cold']);
+  const s4 = step(s3, `sensor.heating_off_schedule_${C}`, { state: '0', attributes: { window_open_climates: [] } });
+  const held = now(s4);
+  assert.deepEqual([held.kind, held.text, held.sub, held.temp], ['held', 'Rychlý start', 'Hlavice naplno, pak 21 °C podle rozvrhu', '21']);
+  const s5 = step(s4, `sensor.heating_valves_${C}`, { state: '0', attributes: { phases: { [V]: ['normal'] } } });
+  const man = now(s5);
+  assert.deepEqual([man.kind, man.text, man.btn, man.sub], ['manual', 'Ručně 23 °C', 'Podle rozvrhu', 'Rozvrh to v 20:00 vrátí na 19 °C']);
+});
+
+test('nowState: held phases, manual tolerance, fallback and no schedule', () => {
+  const ph = (p) => states({ [`sensor.heating_valves_${C}`]: { state: '1', attributes: { phases: { [V]: [p] }, forced: [], closed: [] } } });
+  assert.equal(now(ph('run')).text, 'Doběh');
+  assert.equal(now(ph('overrun')).text, 'Doběh čerpadla');
+  assert.deepEqual([now(ph('closed')).text, now(ph('closed')).sub], ['Zavřeno', 'Hlavice zavřená, pak 21 °C podle rozvrhu']);
+  const forced = states({ [`sensor.heating_valves_${C}`]: { state: '1', attributes: { forced: [V], closed: [] } } });
+  assert.equal(now(forced).text, 'Rychlý start');
+  assert.equal(now(states({ [V]: { state: 'heat', attributes: { temperature: 21.04 } } })).kind, 'normal'); // within 0.05 °C
+  assert.equal(now(states({ [V]: { state: 'heat', attributes: { temperature: 21.2 } } })).kind, 'manual');
+  assert.equal(now(states(), at(2026, 11, 2, 14), { schedules: [] }).kind, 'none');
+  const vac = now(states(), undefined, { program: 'vacation' });
+  assert.equal(vac.text, 'Teď 21 °C, od 20:00 19 °C podle Výchozího');
+  assert.equal(now(states({ [V]: { state: 'unavailable', attributes: {} } })).kind, 'normal'); // no temperature: never manual
+});
+
+test('isFallbackProgram, barSegments, slotsSummary', () => {
+  const vac = sched([['00:00:00', '00:00:00', 16]], { tags: ['program:vacation'] });
+  assert.equal(isFallbackProgram([AUTO], V, 'vacation'), true);
+  assert.equal(isFallbackProgram([AUTO, vac], V, 'vacation'), false);
+  assert.equal(isFallbackProgram([AUTO, { ...vac, paused: true }], V, 'vacation'), false); // a paused own schedule is still own
+  assert.equal(isFallbackProgram([], V, 'auto'), false);
+  assert.deepEqual(barSegments(AUTO).map((s) => [s.start, s.end]), [[0, 360], [360, 1200], [1200, 1440]]);
+  const late = sched([['06:00:00', '20:00:00', 21], ['20:00:00', '00:00:00', 19]]);
+  assert.deepEqual(barSegments(late).map((s) => [s.start, s.end, s.temp]), [[0, 360, 19], [360, 1200, 21], [1200, 1440, 19]]);
+  assert.equal(slotsSummary(AUTO), '3 úseky · 18–21 °C');
+  assert.equal(slotsSummary(vac), 'celý den 16 °C');
 });

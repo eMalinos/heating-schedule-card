@@ -2,7 +2,7 @@
 
 A Home Assistant card for the weekly heating schedules of climate valves, written in Czech. Schedules are stored by [scheduler-component](https://github.com/nielsfaber/scheduler-component) (no own integration); the card reads them, shows what a valve does now and writes `scheduler/add`, `edit` and `remove`. The schedule switches stay **off**: the heating automation alone decides what a valve gets.
 
-Status: data layer and pure logic with a minimal list (v0.1.0 in progress). Week view, editor, copy and automation states follow.
+Status: week view (now tile with the heating automation's state, program chips, temperature-coloured 24 h bars, fallback to Výchozí, per-schedule "Aktivní" pause) on the data layer (v0.1.0 in progress). Editor, valve picker and copy follow.
 
 ## Installation
 
@@ -40,7 +40,7 @@ Pure functions are exported from the module:
 node --test tests/*.test.mjs
 ```
 
-Browser check with a fake `hass` (`tests/fixtures/schedules.json` = real items from the dev HA):
+Browser check with a fake `hass` (`tests/fixtures/schedules.json` = real items from the dev HA). Screenshots of the canvas layouts with a fixed clock: `tests/dom.html?shot=week|fallback|states` (`&dark=1`, `&w=390`).
 
 ```sh
 python3 -m http.server 8765 &

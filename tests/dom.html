@@ -8,6 +8,8 @@
   Browser checks with a fake hass (states + callWS returning tests/fixtures/schedules.json). Run:
   python3 -m http.server 8765 &
   "Google Chrome" --headless=new --virtual-time-budget=5000 --dump-dom http://localhost:8765/tests/dom.html | grep RESULT
+  Screenshots (canvas layouts, fixed clock Mon 14:20): dom.html?shot=week|fallback|states[&dark=1][&w=390]
+  "Google Chrome" --headless=new --window-size=640,1100 --screenshot=out.png "http://localhost:8765/tests/dom.html?shot=week"
 -->
 <div id="box" style="width:480px"></div>
 <pre id="out"></pre>
@@ -17,90 +19,127 @@
   const origError = console.error;
   console.error = (...a) => { errors.push(a.join(' ')); origError(...a); };
 
-  await import('../dist/heating-schedule-card.js');
-  const fixture = await (await fetch('./fixtures/schedules.json')).json();
+  if (new URLSearchParams(location.search).has('shot')) await import('./shots.mjs');
+  else {
+    await import('../dist/heating-schedule-card.js');
+    const fixture = await (await fetch('./fixtures/schedules.json')).json();
 
-  const ws = [], services = [];
-  let onEvent = null, unsubscribed = 0, items = fixture;
-  const hass = {
-    states: { 'climate.kitchen_valve': { state: 'heat', attributes: { friendly_name: 'Kuchyň' } } },
-    callWS: async (msg) => { ws.push(msg); return items; },
-    callService: async (domain, service, data) => { services.push({ domain, service, data }); },
-    connection: { subscribeMessage: async (cb, msg) => { onEvent = cb; ws.push(msg); return () => { unsubscribed++; }; } },
-  };
+    const ws = [], services = [], api = [];
+    let onEvent = null, unsubscribed = 0, items = fixture;
+    const hass = {
+      states: {
+        'climate.kitchen_valve': { state: 'heat', attributes: { friendly_name: 'Kuchyň', temperature: 21 } },
+        'sensor.heating_program_heating_circuit_1': { state: 'auto', attributes: { programs: ['auto', 'odd', 'vacation'], program_names: { auto: 'Výchozí', odd: 'Lichý týden', vacation: 'Dovolená' } } },
+      },
+      callApi: async (method, path, body) => { api.push({ method, path, body }); },
+      callWS: async (msg) => { ws.push(msg); return items; },
+      callService: async (domain, service, data) => { services.push({ domain, service, data }); },
+      connection: { subscribeMessage: async (cb, msg) => { onEvent = cb; ws.push(msg); return () => { unsubscribed++; }; } },
+    };
 
-  const card = document.createElement('heating-schedule-card');
-  card.setConfig({ circuits: [{ id: 'heating_circuit_1', name: 'Přízemí', valves: ['climate.kitchen_valve', 'climate.bedroom_valve'] }] });
-  card.hass = hass;
-  document.getElementById('box').appendChild(card);
-  const root = card.shadowRoot;
-  const tick = (ms = 50) => new Promise((r) => setTimeout(r, ms));
-  await tick(100);
+    const card = document.createElement('heating-schedule-card');
+    card.setConfig({ circuits: [{ id: 'heating_circuit_1', name: 'Přízemí', valves: ['climate.kitchen_valve', 'climate.bedroom_valve'] }] });
+    card.hass = hass;
+    document.getElementById('box').appendChild(card);
+    const root = card.shadowRoot;
+    const tick = (ms = 50) => new Promise((r) => setTimeout(r, ms));
+    await tick(100);
 
-  const r = {};
-  r.loaded = ws.some((m) => m.type === 'scheduler') && ws.some((m) => m.type === 'scheduler_updated');
-  r.title = root.querySelector('h3').textContent.replace(/\s+/g, ' ') === 'Kuchyň · Přízemí';
-  r.programs = [...root.querySelectorAll('.prog')].map((p) => p.textContent).join() === 'Výchozí,vacation';
-  r.rows = root.querySelectorAll('.row').length === 2 && root.querySelector('.days').textContent === 'Po–Ne'
-    && root.querySelector('.chip').textContent.replace(/\s/g, ' ') === '00:00 21 °C';
-  r.editable = !root.textContent.includes('jen ke čtení');
+    const r = {};
+    r.loaded = ws.some((m) => m.type === 'scheduler') && ws.some((m) => m.type === 'scheduler_updated');
+    r.title = root.querySelector('.head b').textContent === 'Kuchyň' && root.querySelector('.head .sec').textContent === 'Přízemí';
+    r.programs = [...root.querySelectorAll('.chip')].map((p) => p.textContent).join() === 'Výchozí,Lichý týden,Dovolená'
+      && root.querySelector('.chip .dot') && root.querySelector('.chip[aria-pressed="true"]').textContent === 'Výchozí';
+    r.rows = root.querySelectorAll('.row').length === 1 && root.querySelector('.open b').textContent === 'Po–Ne'
+      && root.querySelector('.seg').textContent === '21°' && root.querySelector('.now').dataset.kind === 'normal';
+    r.editable = !root.textContent.includes('Jen ke čtení');
+    r.valvePicker = [...root.querySelectorAll('select option')].map((o) => o.value).join() === 'climate.kitchen_valve,climate.bedroom_valve';
 
-  // created schedules: one of ours (switch entity not there yet) and a foreign one (valve not in the config)
-  const n = ws.length;
-  const mine = { ...fixture[0], schedule_id: 'new1', entity_id: 'switch.schedule_new1', weekdays: ['mon'], tags: ['program:auto'] };
-  const foreign = { ...mine, schedule_id: 'for1', entity_id: 'switch.schedule_for1', timeslots: [{ ...mine.timeslots[0], actions: [{ ...mine.timeslots[0].actions[0], entity_id: 'climate.other' }] }] };
-  items = [...fixture, mine, foreign];
-  onEvent({ event: 'scheduler_item_created', schedule_id: 'new1' });
-  onEvent({ event: 'scheduler_item_created', schedule_id: 'for1' });
-  onEvent({ event: 'scheduler_item_updated', schedule_id: 'new1' });
-  await tick(500);
-  r.debounced = ws.length === n + 1;
-  r.newRow = root.querySelectorAll('.row').length === 3;
-  r.waitsForSwitch = services.length === 0;
+    // pause toggle: only the tag changes, written through scheduler/edit
+    root.querySelector('input[data-a="pause"]').click();
+    await tick(100);
+    r.pause = api.length === 1 && api[0].path === 'scheduler/edit' && api[0].body.schedule_id === '848813'
+      && api[0].body.tags.includes('paused') && api[0].body.tags.includes('program:auto') && api[0].body.timeslots.length === 1;
 
-  // an unrelated state change does not rebuild the DOM
-  const cardEl = root.querySelector('ha-card');
-  const withSwitches = { ...hass, states: { ...hass.states, 'switch.schedule_new1': { state: 'on' }, 'switch.schedule_for1': { state: 'on' }, 'sensor.x': { state: '1' } } };
-  card.hass = withSwitches;
-  r.noRebuild = root.querySelector('ha-card') === cardEl;
-  r.noEarlyLoad = ws.length === n + 1;
+    // a program without own schedule: fallback note, dimmed Výchozí rows, copy button writes program-tagged copies
+    root.querySelector('.chip[data-id="odd"]').click();
+    r.fallback = root.textContent.includes('Lichý týden používá výchozí rozvrh') && root.querySelectorAll('.rows.dim .row').length === 1;
+    api.length = 0;
+    root.querySelector('[data-a="copyDefault"]').click();
+    await tick(100);
+    r.copy = api.length === 1 && api[0].path === 'scheduler/add' && api[0].body.tags.includes('program:odd') && !api[0].body.tags.includes('paused')
+      && !('schedule_id' in api[0].body);
+    root.querySelector('.chip[data-id="auto"]').click();
 
-  // the next load turns off only ours, once; the foreign schedule is never touched
-  onEvent({ event: 'scheduler_item_updated', schedule_id: 'new1' });
-  await tick(500);
-  onEvent({ event: 'scheduler_item_updated', schedule_id: 'new1' });
-  await tick(500);
-  r.turnedOff = JSON.stringify(services) === JSON.stringify([{ domain: 'switch', service: 'turn_off', data: { entity_id: 'switch.schedule_new1' } }]);
+    // created schedules: one of ours (switch entity not there yet) and a foreign one (valve not in the config)
+    const n = ws.length;
+    const mine = { ...fixture[0], schedule_id: 'new1', entity_id: 'switch.schedule_new1', weekdays: ['mon'], tags: ['program:auto'] };
+    const foreign = { ...mine, schedule_id: 'for1', entity_id: 'switch.schedule_for1', timeslots: [{ ...mine.timeslots[0], actions: [{ ...mine.timeslots[0].actions[0], entity_id: 'climate.other' }] }] };
+    items = [...fixture, mine, foreign];
+    onEvent({ event: 'scheduler_item_created', schedule_id: 'new1' });
+    onEvent({ event: 'scheduler_item_created', schedule_id: 'for1' });
+    onEvent({ event: 'scheduler_item_updated', schedule_id: 'new1' });
+    await tick(500);
+    r.debounced = ws.length === n + 1;
+    r.newRow = root.querySelectorAll('.row').length === 2;
+    r.waitsForSwitch = services.length === 0;
 
-  // disconnect unsubscribes; reconnect re-subscribes and reloads
-  card.remove();
-  await tick();
-  r.unsubscribed = unsubscribed === 1;
-  const m = ws.length;
-  document.getElementById('box').appendChild(card);
-  await tick(200);
-  r.reloaded = ws.slice(m).some((x) => x.type === 'scheduler');
-  r.resubscribed = ws.slice(m).some((x) => x.type === 'scheduler_updated');
+    // an unrelated state change does not rebuild the DOM
+    const cardEl = root.querySelector('ha-card');
+    const withSwitches = { ...hass, states: { ...hass.states, 'switch.schedule_new1': { state: 'on' }, 'switch.schedule_for1': { state: 'on' }, 'sensor.x': { state: '1' } } };
+    card.hass = withSwitches;
+    r.noRebuild = root.querySelector('ha-card') === cardEl;
+    r.noEarlyLoad = ws.length === n + 1;
 
-  // a rejected subscription shows an error line and is retried on the next hass update
-  let fail = true;
-  const hass2 = { ...withSwitches, connection: { subscribeMessage: async () => { if (fail) throw new Error('unknown command'); return () => {}; } } };
-  const card2 = document.createElement('heating-schedule-card');
-  card2.setConfig({ circuits: [{ id: 'c', valves: ['climate.kitchen_valve'] }] });
-  card2.hass = hass2;
-  document.getElementById('box').appendChild(card2);
-  await tick(100);
-  r.subError = card2.shadowRoot.textContent.includes('Chyba: unknown command');
-  fail = false;
-  card2.hass = { ...hass2 };
-  await tick(100);
-  r.subRetried = !card2.shadowRoot.textContent.includes('Chyba');
-  card2.remove();
+    // the next load turns off only ours, once; the foreign schedule is never touched
+    onEvent({ event: 'scheduler_item_updated', schedule_id: 'new1' });
+    await tick(500);
+    onEvent({ event: 'scheduler_item_updated', schedule_id: 'new1' });
+    await tick(500);
+    r.turnedOff = JSON.stringify(services) === JSON.stringify([{ domain: 'switch', service: 'turn_off', data: { entity_id: 'switch.schedule_new1' } }]);
+
+    // disconnect unsubscribes; reconnect re-subscribes and reloads
+    card.remove();
+    await tick();
+    r.unsubscribed = unsubscribed === 1;
+    const m = ws.length;
+    document.getElementById('box').appendChild(card);
+    await tick(200);
+    r.reloaded = ws.slice(m).some((x) => x.type === 'scheduler');
+    r.resubscribed = ws.slice(m).some((x) => x.type === 'scheduler_updated');
+
+    // a rejected subscription shows an error line and is retried on the next hass update
+    let fail = true;
+    const hass2 = { ...withSwitches, connection: { subscribeMessage: async () => { if (fail) throw new Error('unknown command'); return () => {}; } } };
+    const card2 = document.createElement('heating-schedule-card');
+    card2.setConfig({ circuits: [{ id: 'c', valves: ['climate.kitchen_valve'] }] });
+    card2.hass = hass2;
+    document.getElementById('box').appendChild(card2);
+    await tick(100);
+    r.subError = card2.shadowRoot.textContent.includes('Chyba: unknown command');
+    fail = false;
+    card2.hass = { ...hass2 };
+    await tick(100);
+    r.subRetried = !card2.shadowRoot.textContent.includes('Chyba');
+    card2.remove();
 
 
-  r.noErrors = errors.length === 0;
-  const ok = Object.values(r).every(Boolean);
-  document.getElementById('out').textContent = 'RESULT ' + (ok ? 'PASS ' : 'FAIL ') + JSON.stringify(r) + (errors.length ? ' ERRORS ' + JSON.stringify(errors) : '');
+    // a schedule the card cannot represent: read-only row, no pause switch, no editor tap, never written
+    items = [{ ...fixture[0], repeat_type: 'single' }];
+    const card3 = document.createElement('heating-schedule-card');
+    card3.setConfig({ circuits: [{ id: 'c', valves: ['climate.kitchen_valve'] }] });
+    card3.hass = hass;
+    document.getElementById('box').appendChild(card3);
+    await tick(150);
+    const r3 = card3.shadowRoot;
+    r.readOnly = r3.querySelectorAll('.row.ro').length === 1 && r3.textContent.includes('Jen ke čtení (upraveno jinde)')
+      && !r3.querySelector('input[data-a="pause"]') && !r3.querySelector('.row [data-a="open"]');
+    card3.remove();
+
+    r.noErrors = errors.length === 0;
+    const ok = Object.values(r).every(Boolean);
+    document.getElementById('out').textContent = 'RESULT ' + (ok ? 'PASS ' : 'FAIL ') + JSON.stringify(r) + (errors.length ? ' ERRORS ' + JSON.stringify(errors) : '');
+  }
 </script>
 </body>
 </html>
