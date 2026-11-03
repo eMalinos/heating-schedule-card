@@ -1,6 +1,7 @@
 // heating-schedule-card: weekly heating schedules of climate valves, stored by scheduler-component.
 // One plain ES module: no build step, no dependencies. Pure functions are exported for `node --test`.
 const VERSION = '0.2.1';
+const isCal = (v) => typeof v === 'string' && v.startsWith('calendar.');
 const CZ_CALENDAR = 'calendar.czechia'; // the calendar the Holiday integration creates for Czechia
 
 export const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
@@ -963,13 +964,13 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
   _circuit() { return this._cfg.circuits.find((c) => c.id === this._cfg.valveCircuit[this._valve]); }
 
   /** The holidays the heating rules use for this circuit: `{holidays: Set}`. */
-  _ctx(circuit = this._circuit(), now = new Date()) {
-    // rebuilt only when the circuit, the mode, the year or the holidays (by reference) change, not on every render
+  _ctx(circuit = this._circuit()) {
+    // rebuilt only when the circuit, the mode or the holidays (by reference) change, not on every render
     const st = this._hass?.states, mode = st?.[`input_select.heating_holidays_${circuit.id}`]?.state, dates = st?.[`sensor.heating_programs_${circuit.id}`]?.attributes?.holidays;
-    const m = this._holMemo?.get(circuit.id), year = now.getFullYear();
-    if (m && m.mode === mode && m.year === year && m.dates === dates) return { holidays: m.set };
+    const m = this._holMemo?.get(circuit.id);
+    if (m && m.mode === mode && m.dates === dates) return { holidays: m.set };
     const set = holidayDates(st, circuit.id);
-    (this._holMemo ??= new Map()).set(circuit.id, { mode, year, dates, set });
+    (this._holMemo ??= new Map()).set(circuit.id, { mode, dates, set });
     return { holidays: set };
   }
 
@@ -1602,9 +1603,14 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     else if (a === 'st-prog') this._openPrograms('settings');
     else if (a === 'st-alt') call('input_boolean', 'toggle', { entity_id: `input_boolean.heating_week_alternation_${id}` });
     else if (a === 'st-hol') {
-      call('input_select', 'select_option', { entity_id: `input_select.heating_holidays_${id}`, option: k });
-      // the Holiday integration's Czechia calendar is the default when no calendar is set yet
-      if (k === 'calendar' && !this._hass.states[`input_text.heating_holiday_calendar_${id}`]?.state && this._hass.states[CZ_CALENDAR]) call('input_text', 'set_value', { entity_id: `input_text.heating_holiday_calendar_${id}`, value: CZ_CALENDAR });
+      const st = this._hass.states, calEnt = `input_text.heating_holiday_calendar_${id}`, cur = st[calEnt]?.state;
+      if (k === (st[`input_select.heating_holidays_${id}`]?.state === 'calendar' ? 'calendar' : 'none')) return; // the active tab
+      const select = () => call('input_select', 'select_option', { entity_id: `input_select.heating_holidays_${id}`, option: k });
+      if (k !== 'calendar') return select();
+      if (!st[calEnt]) return this._fail(new Error('Heating je starší, aktualizujte ho'));
+      // the only place that writes the default: nothing valid stored and the Holiday integration's Czechia calendar exists
+      if (isCal(cur) || !st[CZ_CALENDAR]) return select();
+      Promise.resolve().then(() => this._hass.callService('input_text', 'set_value', { entity_id: calEnt, value: CZ_CALENDAR })).then(select).catch((err) => this._fail(err));
     }
     else if (a === 'st-cal') call('input_text', 'set_value', { entity_id: `input_text.heating_holiday_calendar_${id}`, value: k });
   }
@@ -1612,7 +1618,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
   _settingsHtml(circuit, errHtml) {
     const id = circuit.id, st = this._hass?.states ?? {}, att = (e, a) => st[e]?.attributes?.[a];
     const alt = this._alternates(circuit), mode = st[`input_select.heating_holidays_${id}`]?.state === 'calendar' ? 'calendar' : 'none'; // anything else shows as Žádné
-    const cal = st[`input_text.heating_holiday_calendar_${id}`]?.state || (st[CZ_CALENDAR] ? CZ_CALENDAR : '');
+    const stored = st[`input_text.heating_holiday_calendar_${id}`]?.state, cal = isCal(stored) ? stored : ''; // only the stored value is shown
     const parity = weekParity(new Date());
     const calendars = Object.keys(st).filter((e) => e.startsWith('calendar.'));
     if (cal && !calendars.includes(cal)) calendars.unshift(cal);
@@ -1620,8 +1626,8 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     const fmt = (iso) => `${Number(String(iso).slice(8, 10))}. ${Number(String(iso).slice(5, 7))}.`;
     const tab = (k, label) => `<button type="button" class="tab" data-a="st-hol" data-k="${k}" aria-pressed="${mode === k}" ${st[`input_select.heating_holidays_${id}`] ? '' : 'disabled'}>${label}</button>`;
     const err = mode === 'calendar' ? att(`sensor.heating_programs_${id}`, 'holiday_error') : null;
-    const picker = mode === 'calendar' ? `<label class="tile sel"><span class="tx"><span class="sec">Kalendář svátků (integrace Holiday)</span><b>${esc(cal || 'Vyber kalendář')}</b></span>${icon('chevronDown')}
-        <select data-a="st-cal" aria-label="Kalendář svátků"><option value=""${cal ? '' : ' selected'}>Vyber kalendář</option>${calendars.map((e) => `<option value="${esc(e)}"${e === cal ? ' selected' : ''}>${esc(e)}</option>`).join('')}</select></label>
+    const picker = mode === 'calendar' ? `<label class="tile sel"><span class="tx"><span class="sec">Kalendář svátků (integrace Holiday)</span><b>${esc(cal || 'Vyberte kalendář')}</b></span>${icon('chevronDown')}
+        <select data-a="st-cal" aria-label="Kalendář svátků"><option value=""${cal ? '' : ' selected'}>Vyberte kalendář</option>${calendars.map((e) => `<option value="${esc(e)}"${e === cal ? ' selected' : ''}>${esc(e)}</option>`).join('')}</select></label>
         <span class="sec">Svátky přidáte integrací Holiday (Nastavení › Zařízení a služby › Přidat integraci › Holiday, země Česko).</span>${err ? `<div class="err">Kalendář se nenačetl: ${esc(err)}</div>` : ''}` : '';
     const hols = mode === 'none' ? '' : `<div class="hols"><b>Nejbližší svátky · ve svátek se jede podle rozvrhu neděle</b>${next.length
       ? next.map((h) => `<div class="h"><span>${esc(fmt(h.date))}</span><span>${esc(h.name ?? '')}</span></div>`).join('') : '<span class="sec">Žádné nadcházející svátky.</span>'}</div>`;
@@ -1674,7 +1680,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     const prog = this._prog, progName = list.find((p) => p.id === prog).name;
     const title = states[valve]?.attributes?.friendly_name || valve;
 
-    const ctx = this._ctx(circuit, now), alt = this._alternates(circuit), parity = weekParity(now);
+    const ctx = this._ctx(circuit), alt = this._alternates(circuit), parity = weekParity(now);
     const ns = nowState({ states, circuit: circuit.id, valve, schedules: this._schedules, program: running, now, nValves: circuit.valves.length, ctx });
     const toneCss = ns.tone == null ? '' : ns.tone === 'cold' ? 'var(--c-cold)' : ns.tone === 'warm' ? 'var(--c-warm)' : ns.tone === 'accent' ? 'var(--c-accent)' : tempColor(ns.tone, dark);
 

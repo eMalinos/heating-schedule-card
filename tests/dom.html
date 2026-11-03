@@ -873,8 +873,8 @@
     A.states['sensor.heating_schedule_' + CID] = { state: 'auto', attributes: { targets: { [K]: 20 }, holidays_next: [{ date: '2026-12-24', name: 'Štědrý den' }, { date: '2026-12-25', name: '1. svátek vánoční' }] } };
     cw.hass = { ...A.hass };
     await tick(50);
-    // Z kalendáře with nothing stored: the option is written and calendar.czechia is preselected (written too)
-    r.v2Hol = JSON.stringify(A.svc.map((x) => [x.domain, x.service, x.data.entity_id, x.data.option ?? x.data.value])) === JSON.stringify([['input_select', 'select_option', HOL, 'calendar'], ['input_text', 'set_value', CAL, 'calendar.czechia']])
+    // Z kalendáře with nothing stored: calendar.czechia is written first, then the mode
+    r.v2Hol = JSON.stringify(A.svc.map((x) => [x.domain, x.service, x.data.entity_id, x.data.option ?? x.data.value])) === JSON.stringify([['input_text', 'set_value', CAL, 'calendar.czechia'], ['input_select', 'select_option', HOL, 'calendar']])
       && sr3.querySelector('.tab[aria-pressed="true"]').textContent === 'Z kalendáře'
       && [...sr3.querySelectorAll('.hols .h')].map((x) => x.textContent).join('|') === '24. 12.Štědrý den|25. 12.1. svátek vánoční' && sr3.textContent.includes('ve svátek se jede podle rozvrhu neděle');
     A.svc.length = 0;
@@ -886,6 +886,34 @@
     await tick(50);
     r.v2CalErr = sr3.textContent.includes('Kalendář se nenačetl: boom');
     A.states[`sensor.heating_programs_${CID}`].attributes.holiday_error = null;
+    // the active tab does nothing; an empty stored calendar shows the placeholder, not a default
+    A.svc.length = 0;
+    click(cw, '.tab[data-k="calendar"]');
+    await tick(50);
+    const act = A.svc.length === 0;
+    A.states[CAL] = { state: '', attributes: {} };
+    cw.hass = { ...A.hass };
+    await tick(50);
+    const sel0 = sr3.querySelector('select[data-a="st-cal"]');
+    r.v2ActiveTab = act && !!sel0 && sel0.value === '' && sr3.querySelector('.sel b').textContent === 'Vyberte kalendář';
+    // a failing calendar write leaves the mode alone
+    A.states[HOL] = { state: 'none', attributes: {} };
+    const okSvc = A.hass.callService;
+    A.hass.callService = async (d, sv, data) => { if (d === 'input_text') { A.svc.push({ domain: d, service: sv, data }); throw new Error('no write'); } return okSvc(d, sv, data); };
+    cw.hass = { ...A.hass };
+    A.svc.length = 0;
+    click(cw, '.tab[data-k="calendar"]');
+    await tick(50);
+    r.v2CalWriteFails = A.svc.length === 1 && A.svc[0].domain === 'input_text' && A.states[HOL].state === 'none' && sr3.textContent.includes('no write');
+    A.hass.callService = okSvc;
+    // no input_text entity (old heating): nothing is written, the card says so
+    delete A.states[CAL];
+    cw.hass = { ...A.hass };
+    A.svc.length = 0;
+    click(cw, '.tab[data-k="calendar"]');
+    await tick(50);
+    r.v2OldHeating = A.svc.length === 0 && sr3.textContent.includes('Heating je starší, aktualizujte ho');
+    A.states[CAL] = { state: '', attributes: {} };
     A.states[HOL] = { state: 'cz', attributes: {} }; // a stored value outside none / calendar shows as Žádné
     cw.hass = { ...A.hass };
     await tick(50);
