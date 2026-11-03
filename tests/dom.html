@@ -136,6 +136,98 @@
       && !r3.querySelector('input[data-a="pause"]') && !r3.querySelector('.row [data-a="open"]');
     card3.remove();
 
+    // --- review fixes ---
+    const CID = 'heating_circuit_1';
+    const mkHass = (over = {}) => {
+      const h = {
+        states: { ...hass.states }, callWS: async () => items, callApi: async () => {}, callService: async () => {},
+        connection: { subscribeMessage: async () => () => {} }, ...over,
+      };
+      return h;
+    };
+    const mkCard = async (h, cfg = { circuits: [{ id: CID, valves: ['climate.kitchen_valve'] }] }) => {
+      const c = document.createElement('heating-schedule-card');
+      c.setConfig(cfg);
+      if (h) c.hass = h;
+      document.getElementById('box').appendChild(c);
+      await tick(150);
+      return c;
+    };
+    const prog = (state) => ({ ...hass.states, 'sensor.heating_program_heating_circuit_1': { state, attributes: hass.states['sensor.heating_program_heating_circuit_1'].attributes } });
+    const picked = (c) => c.shadowRoot.querySelector('.chip[aria-pressed="true"]')?.textContent;
+    items = fixture;
+
+    // the shown program follows the running one until a chip is picked (setConfig first, hass arrives late)
+    const c4 = await mkCard(null);
+    c4.hass = mkHass({ states: prog('vacation') });
+    await tick(100);
+    r.followsRunning = picked(c4) === 'Dovolená' && c4.shadowRoot.querySelector('.seg').textContent === '16°';
+    c4.hass = mkHass({ states: prog('auto') });
+    r.followsChange = picked(c4) === 'Výchozí';
+    c4.shadowRoot.querySelector('.chip[data-id="odd"]').click();
+    c4.hass = mkHass({ states: prog('vacation') });
+    r.pickedSticks = picked(c4) === 'Lichý týden';
+    c4.remove();
+
+    // a failed write keeps its error through the reload that follows
+    const c5 = await mkCard(mkHass({ callApi: async () => { throw new Error('boom'); } }));
+    c5.shadowRoot.querySelector('input[data-a="pause"]').click();
+    await tick(150);
+    r.errStays = c5.shadowRoot.querySelector('.err')?.textContent === 'Chyba: boom'
+      && c5.shadowRoot.querySelector('input[data-a="pause"]').checked === true;
+    // a pause that bails out (busy) puts the checkbox back
+    c5._busy.add('848813');
+    const cb = c5.shadowRoot.querySelector('input[data-a="pause"]');
+    cb.checked = false;
+    cb.dispatchEvent(new Event('change', { bubbles: true }));
+    r.pauseBail = c5.shadowRoot.querySelector('input[data-a="pause"]').checked === true;
+    c5.remove();
+
+    // fallback copy is all or nothing: the second add fails, the first copy is removed again
+    const two = [fixture[0], { ...fixture[0], schedule_id: 'second', entity_id: 'switch.schedule_second', weekdays: ['mon'] }];
+    let store = [...two], adds = 0;
+    const removed = [];
+    const c6 = await mkCard(mkHass({
+      callWS: async () => store,
+      callApi: async (m, path, body) => {
+        if (path === 'scheduler/add') {
+          if (++adds === 2) throw new Error('second add failed');
+          store = [...store, { ...two[0], schedule_id: 'copy1', entity_id: 'switch.schedule_copy1', tags: body.tags }];
+        } else if (path === 'scheduler/remove') { removed.push(body.schedule_id); store = store.filter((x) => x.schedule_id !== body.schedule_id); }
+      },
+    }));
+    c6.shadowRoot.querySelector('.chip[data-id="odd"]').click();
+    c6.shadowRoot.querySelector('[data-a="copyDefault"]').click();
+    await tick(250);
+    r.rollback = adds === 2 && removed.join() === 'copy1' && store.length === 2 && c6.shadowRoot.querySelector('.err')?.textContent === 'Chyba: second add failed';
+    c6.remove();
+
+    // "Podle rozvrhu": a rejected service call shows the error line
+    const manual = { ...hass.states, 'climate.kitchen_valve': { state: 'heat', attributes: { friendly_name: 'Kuchyň', temperature: 23 } },
+      'sensor.heating_schedule_heating_circuit_1': { state: 'auto', attributes: { targets: { 'climate.kitchen_valve': 21 } } } };
+    const c7 = await mkCard(mkHass({ states: manual, callService: async () => { throw new Error('no press'); } }));
+    c7.shadowRoot.querySelector('[data-a="sync"]').click();
+    await tick(100);
+    r.syncError = c7.shadowRoot.querySelector('.err')?.textContent === 'Chyba: no press';
+    c7.remove();
+
+    // no rebuild while a control has the focus; the deferred render runs on blur; an unchanged output is never assigned
+    const c8 = await mkCard(mkHass(), { circuits: [{ id: CID, valves: ['climate.kitchen_valve', 'climate.bedroom_valve'] }] });
+    const sel = c8.shadowRoot.querySelector('select');
+    sel.focus();
+    const named = { ...hass.states, 'climate.bedroom_valve': { state: 'heat', attributes: { friendly_name: 'Ložnice' } } };
+    c8.hass = mkHass({ states: named });
+    r.deferred = c8.shadowRoot.activeElement === sel && c8.shadowRoot.querySelector('select') === sel
+      && ![...sel.options].some((o) => o.textContent === 'Ložnice');
+    sel.blur();
+    await tick(50);
+    r.rendersOnBlur = [...c8.shadowRoot.querySelectorAll('select option')].some((o) => o.textContent === 'Ložnice');
+    const card8 = c8.shadowRoot.querySelector('ha-card');
+    c8.hass = mkHass({ states: { ...named, 'climate.bedroom_valve': { state: 'heat', attributes: { friendly_name: 'Ložnice', current_temperature: 20 } } } });
+    c8._render();
+    r.sameHtml = c8.shadowRoot.querySelector('ha-card') === card8;
+    c8.remove();
+
     r.noErrors = errors.length === 0;
     const ok = Object.values(r).every(Boolean);
     document.getElementById('out').textContent = 'RESULT ' + (ok ? 'PASS ' : 'FAIL ') + JSON.stringify(r) + (errors.length ? ' ERRORS ' + JSON.stringify(errors) : '');

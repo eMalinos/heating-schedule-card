@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
   normalizeConfig, circuitName, parseSchedule, toPayload, effective, slotAt, groupByProgram, daysLabel, tempColor, fmtTemp, fmtTime,
-  loadSchedules, saveSchedule, removeSchedule, nowState, isFallbackProgram, barSegments, slotsSummary,
+  loadSchedules, saveSchedule, removeSchedule, nowState, DASH, isFallbackProgram, barSegments, slotsSummary,
 } from '../dist/heating-schedule-card.js';
 
 process.env.TZ = 'Europe/Prague'; // the DST test needs a zone with a spring-forward day
@@ -146,7 +146,7 @@ test('effective: program day, fallback, paused', () => {
 test('slotAt: slot, next, carry-over, fallback, paused', () => {
   const s = sched(THREE);
   const r = slotAt([s], V, 'auto', at(2026, 11, 2, 7, 0));
-  assert.deepEqual(r, { temp: 21, start: 360, end: 1200, fromYesterday: false, next: { start: 1200, temp: 19, tomorrow: false } });
+  assert.deepEqual({ ...r, schedule: undefined }, { temp: 21, start: 360, end: 1200, fromYesterday: false, schedule: undefined, isFallback: false, next: { start: 1200, temp: 19, tomorrow: false } });
   // last slot: next is tomorrow's first
   assert.deepEqual(slotAt([s], V, 'auto', at(2026, 11, 2, 22, 0)).next, { start: 0, temp: 18, tomorrow: true });
   // exactly at a start counts as that slot
@@ -313,7 +313,7 @@ test('nowState: order applying > off > not heating > window > held > manual > no
   const step = (st, id, patch) => ({ ...st, [id]: patch });
   const s1 = step(all, `sensor.heating_applying_${C}`, { state: 'idle' });
   assert.equal(now(s1).kind, 'off');
-  assert.deepEqual([now(s1).text, now(s1).temp, now(s1).muted], ['Topení je vypnuté', '—', true]);
+  assert.deepEqual([now(s1).text, now(s1).temp, now(s1).muted], ['Topení je vypnuté', '–', true]);
   assert.match(now(s1).sub, /teď by bylo 21 °C/);
   const s2 = step(s1, `input_select.heating_mode_${C}`, { state: 'by_weather' });
   assert.deepEqual([now(s2).kind, now(s2).text], ['noheat', 'Podle počasí se netopí']);
@@ -345,13 +345,33 @@ test('nowState: held phases, manual tolerance, fallback and no schedule', () => 
 
 test('isFallbackProgram, barSegments, slotsSummary', () => {
   const vac = sched([['00:00:00', '00:00:00', 16]], { tags: ['program:vacation'] });
-  assert.equal(isFallbackProgram([AUTO], V, 'vacation'), true);
-  assert.equal(isFallbackProgram([AUTO, vac], V, 'vacation'), false);
-  assert.equal(isFallbackProgram([AUTO, { ...vac, paused: true }], V, 'vacation'), false); // a paused own schedule is still own
-  assert.equal(isFallbackProgram([], V, 'auto'), false);
+  assert.equal(isFallbackProgram(groupByProgram([AUTO], V), 'vacation'), true);
+  assert.equal(isFallbackProgram(groupByProgram([AUTO, vac], V), 'vacation'), false);
+  assert.equal(isFallbackProgram(groupByProgram([AUTO, { ...vac, paused: true }], V), 'vacation'), false); // a paused own schedule is still own
+  assert.equal(isFallbackProgram(groupByProgram([], V), 'auto'), false);
   assert.deepEqual(barSegments(AUTO).map((s) => [s.start, s.end]), [[0, 360], [360, 1200], [1200, 1440]]);
   const late = sched([['06:00:00', '20:00:00', 21], ['20:00:00', '00:00:00', 19]]);
   assert.deepEqual(barSegments(late).map((s) => [s.start, s.end, s.temp]), [[0, 360, 19], [360, 1200, 21], [1200, 1440, 19]]);
   assert.equal(slotsSummary(AUTO), '3 úseky · 18–21 °C');
   assert.equal(slotsSummary(vac), 'celý den 16 °C');
+});
+
+test('nowState: days label and "podle Výchozího" come from the schedule the slot belongs to', () => {
+  // only a Friday schedule of the running program: at 00:30 on Saturday its evening slot still holds
+  const fri = sched(THREE, { weekdays: ['fri'], tags: ['program:vacation'] });
+  const n = nowState({ states: states(), circuit: C, valve: V, schedules: [fri], program: 'vacation', now: at(2026, 11, 7, 0, 30), nValves: 1 });
+  assert.equal(n.text, 'Teď 19 °C');
+  assert.equal(slotAt([fri], V, 'vacation', at(2026, 11, 7, 0, 30)).schedule, fri);
+  assert.match(n.sub, /^Běží program vacation · Pá$/);
+  assert.ok(!n.text.includes('podle Výchozího'));
+  // the fallback flag follows the day: vacation has Friday only, Saturday runs on Výchozí
+  const sat = nowState({ states: states(), circuit: C, valve: V, schedules: [fri, sched(THREE, { weekdays: ['sat'] })], program: 'vacation', now: at(2026, 11, 7, 12), nValves: 1 });
+  assert.match(sat.text, /podle Výchozího$/);
+  assert.match(sat.sub, /· So$/);
+});
+
+test('fmtTemp(null) is the same dash the tile uses for "no temperature"', () => {
+  assert.equal(fmtTemp(null), DASH);
+  const t = nowState({ states: states({ [`input_select.heating_mode_${C}`]: { state: 'off' } }), circuit: C, valve: V, schedules: [], program: 'auto', now: at(2026, 11, 2, 12), nValves: 1 });
+  assert.deepEqual([t.temp, t.unit], [DASH, '']);
 });

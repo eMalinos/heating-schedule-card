@@ -6,12 +6,14 @@ export const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_LABELS = { mon: 'Po', tue: 'Út', wed: 'St', thu: 'Čt', fri: 'Pá', sat: 'So', sun: 'Ne' };
 const DAY_ALIASES = { daily: DAYS, workday: DAYS.slice(0, 5), weekend: DAYS.slice(5) };
 const DAY_END = 1440;
+export const dow = (d) => DAYS[(d.getDay() + 6) % 7];
 const pad = (n) => String(n).padStart(2, '0');
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
 // ---------- formatting ----------
 
-export const fmtTemp = (t) => (t == null ? '–' : String(Math.round(t * 10) / 10).replace('.', ','));
+export const DASH = '–';
+export const fmtTemp = (t) => (t == null ? DASH : String(Math.round(t * 10) / 10).replace('.', ','));
 export const fmtTime = (m) => `${pad(Math.floor(m / 60))}:${pad(m % 60)}`;
 
 /** Days as a short Czech label: `Po–Pá`, `So–Ne`, `Po, St, Pá`, `Po–Ne`. Runs of 2+ consecutive days are ranges. */
@@ -157,7 +159,7 @@ export function effective(schedules, valve, program, day) {
   return { schedules: on.filter((s) => s.program === 'auto'), isFallback: true };
 }
 
-const slotsOf = (list) => list.flatMap((s) => s.slots).sort((a, b) => a.start - b.start);
+const slotsOf = (list) => list.flatMap((s) => s.slots.map((x) => ({ ...x, schedule: s }))).sort((a, b) => a.start - b.start);
 
 /**
  * The slot a valve follows at `date` -> {temp, start, end, fromYesterday, next: {start, temp, tomorrow} | null}.
@@ -165,11 +167,11 @@ const slotsOf = (list) => list.flatMap((s) => s.slots).sort((a, b) => a.start - 
  * else today's own last slot (as heating does). `start` / `end` are minutes of the day the slot belongs to.
  */
 export function slotAt(schedules, valve, program, date) {
-  const dow = (d) => DAYS[(d.getDay() + 6) % 7];
   const day = (offset) => {
     const d = new Date(date); // calendar days, not 24 h: a DST change day is 23 / 25 h long
     d.setDate(d.getDate() + offset);
-    return slotsOf(effective(schedules, valve, program, dow(d)).schedules);
+    const e = effective(schedules, valve, program, dow(d));
+    return slotsOf(e.schedules).map((x) => ({ ...x, schedule: x.schedule, isFallback: e.isFallback }));
   };
   const now = date.getHours() * 60 + date.getMinutes();
   const today = day(0), yesterday = day(-1);
@@ -180,6 +182,7 @@ export function slotAt(schedules, valve, program, date) {
   const nxt = nextToday || day(1)[0];
   return {
     temp: pick.temp, start: pick.start, end: pick.end, fromYesterday: !cur && yesterday.includes(pick),
+    schedule: pick.schedule, isFallback: pick.isFallback,
     next: nxt ? { start: nxt.start, temp: nxt.temp, tomorrow: !nextToday } : null,
   };
 }
@@ -208,12 +211,11 @@ export const removeSchedule = (hass, id) => hass.callApi('POST', 'scheduler/remo
 
 // ---------- week view: pure logic ----------
 
-const dowOf = (d) => DAYS[(d.getDay() + 6) % 7];
 const stateOf = (states, id) => states?.[id]?.state;
 const attrOf = (states, id, a) => states?.[id]?.attributes?.[a];
 
 /** A program without any schedule of this valve (paused ones count) runs on `auto`'s schedules. */
-export const isFallbackProgram = (schedules, valve, program) => program !== 'auto' && !groupByProgram(schedules, valve).get(program)?.length;
+export const isFallbackProgram = (groups, program) => program !== 'auto' && !groups.get(program)?.length;
 
 /** Bar segments covering 00:00–24:00: a first slot after 00:00 is preceded by the last slot (it holds past midnight). */
 export function barSegments(s) {
@@ -249,32 +251,32 @@ export function nowState({ states = {}, circuit, valve, schedules, program, now 
   const sched = slot?.temp ?? attrOf(states, `sensor.heating_schedule_${circuit}`, 'targets')?.[valve] ?? null;
   const schedTxt = sched == null ? null : `${fmtTemp(sched)} °C`;
   const at = (m, tomorrow) => `${tomorrow ? 'zítra v ' : 'v '}${fmtTime(m)}`;
-  const tile = (kind, icon, text, sub, temp, extra = {}) => ({ kind, icon, text, sub, temp, unit: temp === '—' ? '' : '°C', tone: null, muted: false, btn: '', ...extra });
+  const tile = (kind, icon, text, sub, temp, extra = {}) => ({ kind, icon, text, sub, temp, unit: temp === DASH ? '' : '°C', tone: null, muted: false, btn: '', ...extra });
   const wouldBe = schedTxt ? ` · teď by bylo ${schedTxt}` : '';
 
   if (stateOf(states, `sensor.heating_applying_${circuit}`) === 'applying') {
     const left = Number(attrOf(states, `sensor.heating_applying_${circuit}`, 'left')) || 0;
     return tile('applying', 'progressClock', 'Nastavuji hlavice podle rozvrhu', `${Math.max(0, nValves - left)} z ${nValves} hotovo · po uložení nebo změně programu`,
-      sched == null ? '—' : fmtTemp(sched), { tone: 'accent' });
+      fmtTemp(sched), { tone: 'accent' });
   }
   if (stateOf(states, `input_select.heating_mode_${circuit}`) === 'off') {
-    return tile('off', 'power', 'Topení je vypnuté', `Rozvrh platí, až se zapne${wouldBe}`, '—', { muted: true });
+    return tile('off', 'power', 'Topení je vypnuté', `Rozvrh platí, až se zapne${wouldBe}`, DASH, { muted: true });
   }
   if (stateOf(states, `binary_sensor.heating_active_${circuit}`) === 'off') {
-    return tile('noheat', 'weatherPartlyCloudy', 'Podle počasí se netopí', `Rozvrh počká${wouldBe}`, '—', { muted: true });
+    return tile('noheat', 'weatherPartlyCloudy', 'Podle počasí se netopí', `Rozvrh počká${wouldBe}`, DASH, { muted: true });
   }
   const win = attrOf(states, `sensor.heating_off_schedule_${circuit}`, 'window_open_climates') || [];
   if (win.includes(valve)) {
     const t = attrOf(states, valve, 'temperature');
     return tile('window', 'windowOpenVariant', 'Okno otevřené', `Hlavice zavřená${schedTxt ? ` · po zavření ${schedTxt} podle rozvrhu` : ''}`,
-      t == null ? '—' : fmtTemp(Number(t)), { tone: 'cold' });
+      t == null ? DASH : fmtTemp(Number(t)), { tone: 'cold' });
   }
   const vs = `sensor.heating_valves_${circuit}`;
   const listed = (a) => (attrOf(states, vs, a) || []).includes(valve);
   const phase = attrOf(states, vs, 'phases')?.[valve]?.[0];
   const ph = PHASES[phase] || (listed('closed') ? PHASES.closed : listed('forced') ? PHASES.fast : null);
   if (ph) {
-    return tile('held', ph[2], ph[0], `Hlavice ${ph[3]}${schedTxt ? `, pak ${schedTxt} podle rozvrhu` : ''}`, sched == null ? '—' : fmtTemp(sched), { tone: ph[1] });
+    return tile('held', ph[2], ph[0], `Hlavice ${ph[3]}${schedTxt ? `, pak ${schedTxt} podle rozvrhu` : ''}`, fmtTemp(sched), { tone: ph[1] });
   }
   const target = Number(attrOf(states, valve, 'temperature'));
   const planned = attrOf(states, `sensor.heating_schedule_${circuit}`, 'targets')?.[valve];
@@ -284,15 +286,13 @@ export function nowState({ states = {}, circuit, valve, schedules, program, now 
       n ? `Rozvrh to ${at(n.start, n.tomorrow)} vrátí na ${fmtTemp(n.temp)} °C` : `Podle rozvrhu by bylo ${fmtTemp(planned)} °C`,
       fmtTemp(target), { tone: target, btn: 'Podle rozvrhu' });
   }
-  if (!slot) return tile('none', 'clockOutline', 'Žádný rozvrh', 'Pro tuto hlavici není žádný rozvrh', '—', { muted: true });
-  const eff = effective(schedules, valve, program, dowOf(now));
-  const by = eff.isFallback ? ' podle Výchozího' : '';
+  if (!slot) return tile('none', 'clockOutline', 'Žádný rozvrh', 'Pro tuto hlavici není žádný rozvrh', DASH, { muted: true });
+  const by = slot.isFallback ? ' podle Výchozího' : '';
   const n = slot.next;
   const names = attrOf(states, `sensor.heating_program_${circuit}`, 'program_names') || {};
-  const today = eff.schedules[0];
   return tile('normal', 'clockOutline',
     `Teď ${fmtTemp(slot.temp)} °C${n ? `, od ${n.tomorrow ? 'zítra ' : ''}${fmtTime(n.start)} ${fmtTemp(n.temp)} °C` : ''}${by}`,
-    `Běží program ${names[program] || (program === 'auto' ? 'Výchozí' : program)}${today ? ` · ${daysLabel(today.days)}` : ''}`,
+    `Běží program ${names[program] || (program === 'auto' ? 'Výchozí' : program)}${slot.schedule ? ` · ${daysLabel(slot.schedule.days)}` : ''}`,
     fmtTemp(slot.temp), { tone: slot.temp });
 }
 
@@ -420,14 +420,17 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     this._seq = 0;
     this.shadowRoot.addEventListener('click', (e) => this._click(e));
     this.shadowRoot.addEventListener('change', (e) => this._change(e));
+    // a render deferred while something in the card had focus runs once the focus leaves
+    this.shadowRoot.addEventListener('focusout', () => setTimeout(() => { if (this._dirty) this._render(); }, 0));
   }
 
   setConfig(config) {
     this._cfg = normalizeConfig(config);
     this._valve = this._cfg.valve || this._cfg.circuits[0].valves[0];
     this._prog = null;
+    this._progPicked = false; // until a chip is picked the card shows the running program
     this._sig = null;
-    this._render();
+    this._render(true);
   }
 
   set hass(hass) {
@@ -444,6 +447,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     // a pending reload is dropped (connectedCallback reloads); `_created` is kept for the next load
     clearTimeout(this._timer);
     clearInterval(this._tick);
+    clearTimeout(this._errTimer);
     this._tick = null;
     this._started = false;
     const unsub = this._unsub;
@@ -483,10 +487,10 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     try {
       schedules = await loadSchedules(hass);
     } catch (e) {
-      if (n === this._seq) this._error = e?.message || String(e);
+      if (n === this._seq) this._loadError = e?.message || String(e);
     }
     if (n !== this._seq) return; // a newer load is in flight: ignore this response
-    if (schedules) { this._schedules = schedules; this._error = null; }
+    if (schedules) { this._schedules = schedules; this._loadError = null; }
     this._turnOff();
     this._render();
   }
@@ -517,7 +521,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     const s = (e) => st[e]?.state;
     return JSON.stringify([
       this._hass?.themes?.darkMode,
-      c.valves.map((x) => a(x, 'friendly_name')), this._cfg.circuits.map((x) => circuitName(this._hass, x)),
+      this._cfg.circuits.flatMap((x) => x.valves).map((x) => a(x, 'friendly_name')), this._cfg.circuits.map((x) => circuitName(this._hass, x)),
       a(v, 'temperature'),
       s(`sensor.heating_program_${id}`), a(`sensor.heating_program_${id}`, 'programs'), a(`sensor.heating_program_${id}`, 'program_names'),
       s(`binary_sensor.heating_active_${id}`), s(`input_select.heating_mode_${id}`),
@@ -534,8 +538,11 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     const el = e.target.closest('[data-a]');
     if (!el || el.disabled) return;
     const { a, id } = el.dataset;
-    if (a === 'prog') { this._prog = id; this._render(); }
-    else if (a === 'sync') this._hass.callService('input_button', 'press', { entity_id: `input_button.heating_sync_${this._circuit().id}` });
+    if (a === 'prog') { this._prog = id; this._progPicked = true; this._render(true); }
+    else if (a === 'sync') {
+      Promise.resolve().then(() => this._hass.callService('input_button', 'press', { entity_id: `input_button.heating_sync_${this._circuit().id}` }))
+        .catch((err) => this._fail(err));
+    }
     else if (a === 'open' || a === 'add') {
       // the editor comes with #342; until then the card only announces the tap
       this.dispatchEvent(new CustomEvent('hsc-edit', { bubbles: true, composed: true, detail: { valve: this._valve, program: this._prog, schedule: id ? this._schedules.find((s) => s.id === id) : null } }));
@@ -545,37 +552,58 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
   _change(e) {
     const el = e.target.closest('[data-a]');
     if (!el) return;
-    if (el.dataset.a === 'valve') { this._valve = el.value; this._prog = null; this._render(); }
+    if (el.dataset.a === 'valve') { this._valve = el.value; this._prog = null; this._progPicked = false; this._render(true); }
     else if (el.dataset.a === 'pause') this._pause(el.dataset.id, !el.checked);
+  }
+
+  /** Shows a failed write / service call until the next successful write or for 10 s. */
+  _fail(err) {
+    this._writeError = err?.message || String(err);
+    clearTimeout(this._errTimer);
+    this._errTimer = setTimeout(() => { this._writeError = null; this._render(); }, 10000);
+    this._render(true);
   }
 
   async _write(key, fn) {
     this._busy.add(key);
-    this._render();
+    this._render(true);
+    let failed = false;
     try {
       await fn();
-      this._error = null;
+      this._writeError = null;
     } catch (err) {
-      this._error = err?.message || String(err);
+      failed = true;
+      this._fail(err);
     }
     this._busy.delete(key);
     await this._load(); // the subscription would too; this makes the result show without waiting for its debounce
+    if (failed) this._render(true);
   }
 
   /** "Aktivní" switch of a row: only the `paused` tag changes. */
   _pause(id, paused) {
     const s = this._schedules.find((x) => x.id === id);
-    if (!s || !s.editable || this._busy.has(id)) return;
+    if (!s || !s.editable || this._busy.has(id)) { this._render(true); return; } // put the checkbox back to the stored state
     return this._write(id, () => saveSchedule(this._hass, { ...s, paused }, s));
   }
 
-  /** A program without schedules gets copies of the valve's Výchozí schedules, tagged with the program. */
+  /** A program without schedules gets copies of the valve's Výchozí schedules, tagged with the program. All or nothing. */
   _copyDefault() {
-    const prog = this._prog;
-    const src = (groupByProgram(this._schedules, this._valve).get('auto') || []).filter((s) => !s.paused && s.editable);
-    if (this._busy.has('copy') || !src.length || !isFallbackProgram(this._schedules, this._valve, prog)) return;
+    const prog = this._prog, valve = this._valve;
+    const groups = groupByProgram(this._schedules, valve);
+    const src = (groups.get('auto') || []).filter((s) => !s.paused && s.editable);
+    if (this._busy.has('copy') || !src.length || !isFallbackProgram(groups, prog)) return;
+    const before = new Set(this._schedules.map((s) => s.id));
     return this._write('copy', async () => {
-      for (const s of src) await saveSchedule(this._hass, { ...s, id: undefined, program: prog, paused: false });
+      try {
+        for (const s of src) await saveSchedule(this._hass, { ...s, id: undefined, program: prog, paused: false });
+      } catch (err) {
+        // roll back the copies already added (new schedules of this valve and program), then report the original error
+        try {
+          for (const c of (await loadSchedules(this._hass)).filter((x) => !before.has(x.id) && x.program === prog && x.valves.includes(valve))) await removeSchedule(this._hass, c.id);
+        } catch { /* the original error is the one to show */ }
+        throw err;
+      }
     });
   }
 
@@ -592,7 +620,8 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     return { running, list: ids.map((id) => ({ id, name: names[id] || id })) };
   }
 
-  _render() {
+  /** `force` = a user action: renders even with the focus inside the card. */
+  _render(force = false) {
     if (!this._cfg) return;
     this._sig = this._signature();
     const hass = this._hass, now = new Date();
@@ -601,14 +630,14 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     const states = hass?.states ?? {};
     const valve = this._valve;
     const { running, list } = this._programs();
-    if (!this._prog || !list.some((p) => p.id === this._prog)) this._prog = running;
+    if (!this._progPicked || !list.some((p) => p.id === this._prog)) { this._prog = running; this._progPicked = false; }
     const prog = this._prog, progName = list.find((p) => p.id === prog).name;
     const title = states[valve]?.attributes?.friendly_name || valve;
 
     const ns = nowState({ states, circuit: circuit.id, valve, schedules: this._schedules, program: running, now, nValves: circuit.valves.length });
     const toneCss = ns.tone == null ? '' : ns.tone === 'cold' ? 'var(--c-cold)' : ns.tone === 'warm' ? 'var(--c-warm)' : ns.tone === 'accent' ? 'var(--c-accent)' : tempColor(ns.tone, dark);
 
-    const today = dowOf(now), frac = (now.getHours() * 60 + now.getMinutes()) / 1440;
+    const today = dow(now), frac = (now.getHours() * 60 + now.getMinutes()) / 1440;
     const seg = (x) => `<span class="seg" style="flex:${x.end - x.start} 1 0;--c:${tempColor(x.temp, dark)}">${x.end - x.start >= 150 ? `${fmtTemp(x.temp)}°` : ''}</span>`;
     const bar = (s, line) => `<div class="bar" ${line ? 'data-a="open" data-id="' + esc(s.id) + '"' : ''}>${barSegments(s).map(seg).join('')}${line && s.days.includes(today) ? `<i class="nowline" style="left:calc(3px + (100% - 6px) * ${frac.toFixed(4)})"></i>` : ''}</div>`;
     const ruler = '<div class="ruler"><span>0</span><span>6</span><span>12</span><span>18</span><span>24</span></div>';
@@ -627,7 +656,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     const groups = groupByProgram(this._schedules, valve);
     const own = groups.get(prog) || [];
     let main;
-    if (!isFallbackProgram(this._schedules, valve, prog)) {
+    if (!isFallbackProgram(groups, prog)) {
       main = `<div class="rows">${own.map(row).join('') || '<span class="sec">Žádný rozvrh</span>'}</div>
         <button type="button" class="btn wide" data-a="add">${icon('plus')}Přidat dny s jiným rozvrhem</button>`;
     } else {
@@ -641,14 +670,14 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
         <button type="button" class="btn primary wide" data-a="copyDefault" ${copyable && !this._busy.has('copy') ? '' : 'disabled'}>${icon('contentCopy')}Vlastní rozvrh pro ${esc(progName.toLowerCase())}</button>`;
     }
 
-    const valves = this._cfg.circuits.map((c) => ({ c, v: c.valves }));
-    const opts = (c, v) => v.map((x) => `<option value="${esc(x)}"${x === valve ? ' selected' : ''}>${esc(states[x]?.attributes?.friendly_name || x)}</option>`).join('');
+    const circuits = this._cfg.circuits;
+    const opts = (v) => v.map((x) => `<option value="${esc(x)}"${x === valve ? ' selected' : ''}>${esc(states[x]?.attributes?.friendly_name || x)}</option>`).join('');
     const picker = this._cfg.valve ? '' : `<label class="pill">Hlavice: ${esc(title)}${icon('chevronDown', 18)}<select data-a="valve" aria-label="Hlavice">${
-      valves.length > 1 ? valves.map(({ c, v }) => `<optgroup label="${esc(circuitName(hass, c))}">${opts(c, v)}</optgroup>`).join('') : opts(valves[0].c, valves[0].v)
+      circuits.length > 1 ? circuits.map((c) => `<optgroup label="${esc(circuitName(hass, c))}">${opts(c.valves)}</optgroup>`).join('') : opts(circuits[0].valves)
     }</select></label>`;
 
-    const err = this._subError || this._error;
-    this.shadowRoot.innerHTML = `<style>${STYLE}</style><ha-card><div class="card${dark ? ' dark' : ''}${ns.muted ? ' muted-bars' : ''}" style="--tone:${toneCss || 'transparent'}">
+    const err = this._subError || this._writeError || this._loadError;
+    const html = `<style>${STYLE}</style><ha-card><div class="card${dark ? ' dark' : ''}${ns.muted ? ' muted-bars' : ''}" style="--tone:${toneCss || 'transparent'}">
       <div class="head"><div class="t"><span class="sec">${esc(circuitName(hass, circuit))}</span><b>${esc(title)}</b></div>${picker}</div>
       ${err ? `<div class="err">Chyba: ${esc(err)}</div>` : ''}
       <div class="now${ns.muted || ns.tone == null ? ' muted' : ''}" data-kind="${ns.kind}">
@@ -661,6 +690,12 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
         `<button type="button" class="chip" data-a="prog" data-id="${esc(p.id)}" aria-pressed="${p.id === prog}">${p.id === running ? '<span class="dot" title="Běží"></span>' : ''}${esc(p.name)}</button>`).join('')}</div></div>
       ${main}
     </div></ha-card>`;
+    if (html === this._html) { this._dirty = false; return; }
+    // an automatic render never rebuilds the DOM under the user's hands (focused control, open select)
+    if (!force && this.shadowRoot.activeElement) { this._dirty = true; return; }
+    this._dirty = false;
+    this._html = html;
+    this.shadowRoot.innerHTML = html;
   }
 }
 
