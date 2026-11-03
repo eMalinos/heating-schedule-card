@@ -1,0 +1,162 @@
+[
+ {
+  "schedule_id": "848813",
+  "weekdays": [
+   "daily"
+  ],
+  "start_date": null,
+  "end_date": null,
+  "timeslots": [
+   {
+    "start": "00:00",
+    "stop": "23:59",
+    "conditions": [],
+    "condition_type": null,
+    "track_conditions": false,
+    "actions": [
+     {
+      "service": "climate.set_temperature",
+      "entity_id": "climate.kitchen_valve",
+      "service_data": {
+       "temperature": 21
+      }
+     }
+    ]
+   }
+  ],
+  "repeat_type": "repeat",
+  "name": "bench kitchen_valve auto",
+  "enabled": true,
+  "next_entries": [
+   0
+  ],
+  "timestamps": [
+   "2026-11-04T00:00:00+00:00"
+  ],
+  "entity_id": "switch.schedule_bench_kitchen_valve_auto",
+  "tags": [
+   "kitchen_valve",
+   "program:auto"
+  ]
+ },
+ {
+  "schedule_id": "fbc677",
+  "weekdays": [
+   "daily"
+  ],
+  "start_date": null,
+  "end_date": null,
+  "timeslots": [
+   {
+    "start": "00:00",
+    "stop": "23:59",
+    "conditions": [],
+    "condition_type": null,
+    "track_conditions": false,
+    "actions": [
+     {
+      "service": "climate.set_temperature",
+      "entity_id": "climate.kitchen_valve",
+      "service_data": {
+       "temperature": 16
+      }
+     }
+    ]
+   }
+  ],
+  "repeat_type": "repeat",
+  "name": "bench kitchen_valve vacation",
+  "enabled": false,
+  "next_entries": [
+   0
+  ],
+  "timestamps": [
+   "2026-11-04T00:00:00+00:00"
+  ],
+  "entity_id": "switch.schedule_bench_kitchen_valve_vacation",
+  "tags": [
+   "kitchen_valve",
+   "program:vacation"
+  ]
+ },
+ {
+  "schedule_id": "777076",
+  "weekdays": [
+   "daily"
+  ],
+  "start_date": null,
+  "end_date": null,
+  "timeslots": [
+   {
+    "start": "00:00",
+    "stop": "23:59",
+    "conditions": [],
+    "condition_type": null,
+    "track_conditions": false,
+    "actions": [
+     {
+      "service": "climate.set_temperature",
+      "entity_id": "climate.bedroom_valve",
+      "service_data": {
+       "temperature": 21
+      }
+     }
+    ]
+   }
+  ],
+  "repeat_type": "repeat",
+  "name": "bench bedroom_valve auto",
+  "enabled": true,
+  "next_entries": [
+   0
+  ],
+  "timestamps": [
+   "2026-11-04T00:00:00+00:00"
+  ],
+  "entity_id": "switch.schedule_bench_bedroom_valve_auto",
+  "tags": [
+   "bedroom_valve",
+   "program:auto"
+  ]
+ },
+ {
+  "schedule_id": "087523",
+  "weekdays": [
+   "daily"
+  ],
+  "start_date": null,
+  "end_date": null,
+  "timeslots": [
+   {
+    "start": "00:00",
+    "stop": "23:59",
+    "conditions": [],
+    "condition_type": null,
+    "track_conditions": false,
+    "actions": [
+     {
+      "service": "climate.set_temperature",
+      "entity_id": "climate.bedroom_valve",
+      "service_data": {
+       "temperature": 16
+      }
+     }
+    ]
+   }
+  ],
+  "repeat_type": "repeat",
+  "name": "bench bedroom_valve vacation",
+  "enabled": false,
+  "next_entries": [
+   0
+  ],
+  "timestamps": [
+   "2026-11-04T00:00:00+00:00"
+  ],
+  "entity_id": "switch.schedule_bench_bedroom_valve_vacation",
+  "tags": [
+   "bedroom_valve",
+   "program:vacation"
+  ]
+ }
+]

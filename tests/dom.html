@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="cs">
+<head><meta charset="utf-8"><title>heating-schedule-card DOM checks</title>
+<style>body{margin:0;padding:16px;background:#efefef;font-family:Roboto,system-ui,sans-serif}</style>
+</head>
+<body>
+<!--
+  Browser checks with a fake hass (states + callWS returning tests/fixtures/schedules.json). Run:
+  python3 -m http.server 8765 &
+  "Google Chrome" --headless=new --virtual-time-budget=5000 --dump-dom http://localhost:8765/tests/dom.html | grep RESULT
+-->
+<div id="box" style="width:480px"></div>
+<pre id="out"></pre>
+<script type="module">
+  const errors = [];
+  addEventListener('error', (e) => errors.push(e.message));
+  const origError = console.error;
+  console.error = (...a) => { errors.push(a.join(' ')); origError(...a); };
+
+  await import('../dist/heating-schedule-card.js');
+  const fixture = await (await fetch('./fixtures/schedules.json')).json();
+
+  const ws = [], services = [];
+  let onEvent = null, unsubscribed = 0, items = fixture;
+  const hass = {
+    states: { 'climate.kitchen_valve': { state: 'heat', attributes: { friendly_name: 'Kuchyň' } } },
+    callWS: async (msg) => { ws.push(msg); return items; },
+    callService: async (domain, service, data) => { services.push({ domain, service, data }); },
+    connection: { subscribeMessage: async (cb, msg) => { onEvent = cb; ws.push(msg); return () => { unsubscribed++; }; } },
+  };
+
+  const card = document.createElement('heating-schedule-card');
+  card.setConfig({ circuits: [{ id: 'heating_circuit_1', name: 'Přízemí', valves: ['climate.kitchen_valve', 'climate.bedroom_valve'] }] });
+  card.hass = hass;
+  document.getElementById('box').appendChild(card);
+  const root = card.shadowRoot;
+  const tick = (ms = 50) => new Promise((r) => setTimeout(r, ms));
+  await tick(100);
+
+  const r = {};
+  r.loaded = ws[0]?.type === 'scheduler' && ws.some((m) => m.type === 'scheduler_updated');
+  r.title = root.querySelector('h3').textContent.replace(/\s+/g, ' ') === 'Kuchyň · Přízemí';
+  r.programs = [...root.querySelectorAll('.prog')].map((p) => p.textContent).join() === 'Výchozí,vacation';
+  r.rows = root.querySelectorAll('.row').length === 2 && root.querySelector('.days').textContent === 'Po–Ne'
+    && root.querySelector('.chip').textContent.replace(/\s/g, ' ') === '00:00 21 °C';
+  r.editable = !root.textContent.includes('jen ke čtení');
+
+  // a created schedule: the list reloads once (debounced) and its switch is turned off
+  const n = ws.length;
+  items = [...fixture, { ...fixture[0], schedule_id: 'new1', entity_id: 'switch.schedule_new1', weekdays: ['mon'], tags: ['program:auto'] }];
+  onEvent({ event: 'scheduler_item_created', schedule_id: 'new1' });
+  onEvent({ event: 'scheduler_item_updated', schedule_id: 'new1' });
+  await tick(500);
+  r.debounced = ws.length === n + 1;
+  r.turnedOff = JSON.stringify(services) === JSON.stringify([{ domain: 'switch', service: 'turn_off', data: { entity_id: 'switch.schedule_new1' } }]);
+  r.newRow = root.querySelectorAll('.row').length === 3;
+
+  card.remove();
+  await tick();
+  r.unsubscribed = unsubscribed === 1;
+
+  r.noErrors = errors.length === 0;
+  const ok = Object.values(r).every(Boolean);
+  document.getElementById('out').textContent = 'RESULT ' + (ok ? 'PASS ' : 'FAIL ') + JSON.stringify(r) + (errors.length ? ' ERRORS ' + JSON.stringify(errors) : '');
+</script>
+</body>
+</html>
