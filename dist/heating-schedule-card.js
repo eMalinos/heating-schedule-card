@@ -267,6 +267,101 @@ export function daysConflict(schedules, valve, program, days, exceptId = null) {
 
 const plural = (n, one, few, many) => `${n} ${n === 1 ? one : n < 5 ? few : many}`;
 
+// ---------- copy: pure logic ----------
+
+/** The schedules of `source` a copy can start from: editable and not paused (a read-only or paused one is never copied). */
+export const copyable = (schedules, source) => schedules.filter((s) => s.editable && !s.paused && s.valve === source);
+
+/**
+ * What copying from `source` to `targets` changes -> {add: [model], edit: [model with id], remove: [id], notes: {valve: text}}.
+ * Only the source's editable, non-paused single-valve schedules are copied (never a read-only one); only slot starts count,
+ * a copy keeps its slots as they are. mode 'valve': every schedule of the `programs`; mode 'one': the `scheduleIds`, into
+ * `targetProgram` ('same' = their own program). conflict 'replace': whole valve = the target's schedules of each copied
+ * program are removed first; selected = the copied weekdays are taken out of the target's schedules of that program (one left
+ * without days is removed); 'fill': a program the target already has is kept / only weekdays it has free are copied.
+ * A target's read-only schedule is never removed or edited, its weekdays stay taken and it gets its own note (only editable
+ * schedules count as "the target already has"). With a fixed target program, weekdays two selected schedules both want go to
+ * the first one; the note names the rest. A target whose circuit lacks a
+ * target program is skipped with a note. `programsByValve` = {valve: [program ids of its circuit]} (absent = no check).
+ */
+export function planCopy({ schedules, source, mode, programs = [], scheduleIds = [], targetProgram = 'same', targets = [], conflict = 'replace', programsByValve = null, names = {} }) {
+  const pn = (p) => names[p] || (p === 'auto' ? 'Výchozí' : p);
+  const list = (ps) => ps.map(pn).join(', ');
+  const pool = copyable(schedules, source);
+  const progs = new Set(programs), ids = new Set(scheduleIds);
+  const jobs = mode === 'valve' ? pool.filter((s) => progs.has(s.program)) : [...ids].map((id) => pool.find((s) => s.id === id)).filter(Boolean);
+  const progOf = (s) => (mode === 'one' && targetProgram !== 'same' ? targetProgram : s.program);
+  const out = { add: [], edit: [], remove: [], notes: {} };
+  const copyOf = (v, p, days, s) => ({ valve: v, program: p, days: DAYS.filter((d) => days.includes(d)), slots: s.slots.map((x) => ({ ...x })), paused: false });
+  for (const v of [...new Set(targets)].filter((x) => x !== source)) {
+    if (!jobs.length) { out.notes[v] = 'není co kopírovat.'; continue; }
+    const wanted = [...new Set(jobs.map(progOf))];
+    const missing = programsByValve ? wanted.filter((p) => !programsByValve[v]?.includes(p)) : [];
+    if (missing.length) { out.notes[v] = `přeskočeno, program ${list(missing)} v jeho okruhu není.`; continue; }
+    const st = new Map(); // program -> what the target has there + what this copy already claimed
+    const state = (p) => {
+      if (!st.has(p)) {
+        const ex = schedules.filter((s) => s.valves.includes(v) && s.program === p);
+        st.set(p, { ex, had: new Set(ex.filter((s) => s.editable).flatMap((s) => s.days)), ro: new Set(ex.filter((s) => !s.editable).flatMap((s) => s.days)),
+          cur: new Map(ex.filter((s) => s.editable).map((s) => [s.id, { s, days: [...s.days] }])), claimed: new Map() }); // claimed: weekday -> source program that took it
+      }
+      return st.get(p);
+    };
+    const added0 = out.add.length;
+    const hit = new Set(), kept = new Set(), ro = new Set(), replaced = [], dropped = [];
+    if (mode === 'valve') {
+      for (const p of wanted) {
+        const S = state(p);
+        if (S.ex.some((s) => !s.editable)) { ro.add(p); continue; }
+        if (S.ex.length) {
+          if (conflict === 'fill') { kept.add(p); continue; }
+          replaced.push([p, S.ex.length]);
+          S.ex.forEach((s) => out.remove.push(s.id));
+          S.cur.clear();
+        }
+        jobs.filter((s) => progOf(s) === p).forEach((s) => out.add.push(copyOf(v, p, s.days, s)));
+      }
+    } else {
+      for (const s of jobs) {
+        const p = progOf(s), S = state(p);
+        if (s.days.some((d) => S.had.has(d))) hit.add(p);
+        if (s.days.some((d) => S.ro.has(d))) ro.add(p);
+        const taken = s.days.filter((d) => !S.ro.has(d) && S.claimed.has(d));
+        for (const by of new Set(taken.map((d) => S.claimed.get(d)))) {
+          dropped.push(`${daysLabel(taken.filter((d) => S.claimed.get(d) === by))} z programu ${pn(s.program)} se nekopírují, ${pn(by)} je už má`);
+        }
+        let days = s.days.filter((d) => !S.ro.has(d) && !S.claimed.has(d));
+        if (conflict === 'fill') days = days.filter((d) => !S.had.has(d));
+        else for (const e of S.cur.values()) e.days = e.days.filter((d) => !days.includes(d));
+        if (!days.length) continue;
+        days.forEach((d) => S.claimed.set(d, s.program));
+        out.add.push(copyOf(v, p, days, s));
+      }
+    }
+    for (const S of st.values()) {
+      for (const [id, e] of S.cur) {
+        if (e.days.length === e.s.days.length) continue;
+        if (e.days.length) out.edit.push({ id, valve: e.s.valve, program: e.s.program, days: e.days, slots: e.s.slots, paused: e.s.paused });
+        else out.remove.push(id);
+      }
+    }
+    // the preview text, as in the canvas (copyNotes)
+    const n = out.add.length - added0;
+    const parts = [];
+    if (mode === 'valve') {
+      if (replaced.length) parts.push(`nahradí ${replaced.map(([p, k]) => `${pn(p)} (${plural(k, 'rozvrh', 'rozvrhy', 'rozvrhů')})`).join(', ')}`);
+      if (kept.size) parts.push(`${list([...kept])} nechá být, doplní jen ${list(wanted.filter((p) => !kept.has(p) && !ro.has(p))) || 'nic'}`);
+      else if (replaced.length && wanted.length > replaced.length) parts.push('ostatní programy doplní');
+    } else if (hit.size) {
+      parts.push(conflict === 'replace' ? `v ${list([...hit])} přepíše stejné dny, ostatní dny zůstanou` : n ? `doplní jen dny, které v ${list([...hit])} ještě nemá` : `nic nedoplní, dny už v ${list([...hit])} má`);
+    }
+    parts.push(...dropped);
+    if (ro.size) parts.push(`${list([...ro])} má rozvrh jen ke čtení, ten zůstane`);
+    out.notes[v] = parts.length ? `${parts.join('; ')}.` : n ? `dostane ${plural(n, 'rozvrh', 'rozvrhy', 'rozvrhů')}, nic se nepřepíše.` : 'nic se nezkopíruje.';
+  }
+  return out;
+}
+
 // ---------- week view: pure logic ----------
 
 const stateOf = (states, id) => states?.[id]?.state;
@@ -510,6 +605,16 @@ const STYLE = `
   .tile { position: relative; display: flex; align-items: center; gap: 10px; min-width: 0; min-height: 56px; padding: 10px 12px; border: 1px solid transparent; border-radius: 16px; background: var(--c-fill); box-shadow: var(--c-inset); text-align: left; }
   .tile[aria-pressed="true"] { border-color: color-mix(in srgb, var(--c-accent) 45%, var(--c-border)); background: var(--c-tint); box-shadow: var(--c-raised-shadow); }
   .tile .tic { width: 32px; height: 32px; flex: none; border-radius: 50%; display: grid; place-items: center; background: var(--c-card); color: var(--c-warm); }
+  .tabs { display: flex; gap: 4px; padding: 3px; border-radius: 999px; background: var(--c-fill); box-shadow: var(--c-inset); }
+  .tab { flex: 1; min-height: 40px; border: 1px solid transparent; border-radius: 999px; background: transparent; font-size: 14px; font-weight: 600; color: var(--c-text2); }
+  .tab[aria-pressed="true"] { border-color: var(--c-border); background: var(--c-raised); box-shadow: var(--c-raised-shadow); color: var(--c-text); }
+  .tab:disabled, .tile:disabled { opacity: .5; cursor: default; }
+  .tile .tic.cal { color: var(--c-text2); }
+  .tile.wide { width: 100%; box-sizing: border-box; }
+  .tile.wide .tx { flex: 1; gap: 6px; }
+  .bar.mini { height: 14px; padding: 0; background: none; box-shadow: none; }
+  .note.stack { flex-direction: column; align-items: stretch; gap: 6px; }
+  .note.stack .sec { font-size: 13px; line-height: 1.4; }
   .tile[aria-pressed="true"] .tic { background: var(--c-accent); color: var(--c-on-accent); }
   .tile .tx { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
   .tile .tx b { font-size: 14px; font-weight: 600; }
@@ -539,7 +644,8 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     this._turning = new Set(); // ids with a turn_off in flight
     this._busy = new Set(); // ids of schedules being written (pause toggle), `copy` while the fallback copy runs
     this._seq = 0;
-    this._view = 'week'; // 'week' | 'picker' | 'editor'
+    this._view = 'week'; // 'week' | 'picker' | 'editor' | 'copy'
+    this._copy = null; // copy view state while view is 'copy'
     this._ed = null; // editor state while view is 'editor'
     this._pick = null; // valve picker state while view is 'picker'
     this.shadowRoot.addEventListener('click', (e) => this._click(e));
@@ -554,7 +660,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     this._prog = null;
     this._progPicked = false; // until a chip is picked the card shows the running program
     this._view = 'week';
-    this._ed = this._pick = null;
+    this._ed = this._pick = this._copy = null;
     this._sig = null;
     this._render(true);
   }
@@ -641,12 +747,28 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
 
   _allValves() { return [...new Set(this._cfg.circuits.flatMap((c) => c.valves))]; }
 
-  /** Programs every picked valve's circuit(s) have (a valve listed in two circuits needs both). */
-  _pickerPrograms() {
-    const valves = this._pick.valves.length ? this._pick.valves : [this._valve];
+  /** Programs every circuit of `valves` has (a valve listed in two circuits needs both). */
+  _sharedPrograms(valves) {
     const cs = [...new Set(valves.flatMap((v) => this._cfg.circuits.filter((c) => c.valves.includes(v))))];
     const lists = cs.map((c) => this._programs(c).list);
     return lists[0].filter((p) => lists.every((l) => l.some((q) => q.id === p.id)));
+  }
+
+  _pickerPrograms() { return this._sharedPrograms(this._pick.valves.length ? this._pick.valves : [this._valve]); }
+
+  /** Program ids per valve (see `_sharedPrograms`) and all program names; rebuilt only when the config or a program sensor changes. */
+  _programInfo() {
+    const st = this._hass?.states ?? {};
+    const key = this._cfg.circuits.map((c) => st[`sensor.heating_program_${c.id}`]);
+    const k = this._pi;
+    if (!k || k.cfg !== this._cfg || key.some((x, i) => x !== k.key[i])) {
+      this._pi = {
+        cfg: this._cfg, key,
+        byValve: Object.fromEntries(this._allValves().map((v) => [v, this._sharedPrograms([v]).map((p) => p.id)])),
+        names: Object.assign({}, ...this._cfg.circuits.map((c) => Object.fromEntries(this._programs(c).list.map((p) => [p.id, p.name])))),
+      };
+    }
+    return this._pi;
   }
 
   _circuit() { return this._cfg.circuits.find((c) => c.id === this._cfg.valveCircuit[this._valve]); }
@@ -686,7 +808,9 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
       // rows and the add button announce `hsc-edit`; the editor opens unless a listener calls preventDefault
       const ev = new CustomEvent('hsc-edit', { bubbles: true, composed: true, cancelable: true, detail: { valve: this._valve, program: this._prog, schedule: id ? this._schedules.find((s) => s.id === id) : null } });
       if (this.dispatchEvent(ev)) this._onEdit(ev);
-    } else if (a === 'copyDefault') this._copyDefault();
+    } else if (a === 'copyOpen') this._announceCopy({ valve: this._valve, program: this._prog, schedule: null });
+    else if (a.startsWith('cp-')) { if (a !== 'cp-prog') this._copyAction(a, el.dataset.k); }
+    else if (a === 'copyDefault') this._copyDefault();
     else this._editorAction(el.dataset);
   }
 
@@ -696,6 +820,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     if (el.dataset.a === 'valve') { this._valve = el.value; this._prog = null; this._progPicked = false; this._render(true); }
     else if (el.dataset.a === 'pause') this._pause(el.dataset.id, !el.checked);
     else if (el.dataset.a === 'pickprog' && this._pick) { this._pick.program = el.value; this._render(true); }
+    else if (el.dataset.a === 'cp-prog' && this._copy) { this._copy.targetProgram = el.value; this._render(true); }
   }
 
   // ---------- editor ----------
@@ -728,6 +853,14 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     this._ed = { existing: null, valves, program, days: DAYS.filter((d) => !used.includes(d)), slots: [{ start: 0, end: DAY_END, temp: 20 }], sel: 0, confirm: false, stale: false };
     this._pick = null;
     this._view = 'editor';
+  }
+
+  /** Why the editor's copy button is off, or ''. Only a stored, active schedule without unsaved edits is copied. */
+  _copyBlock(ed) {
+    if (!ed.existing) return '';
+    if (ed.existing.paused) return 'Pozastavený rozvrh se nekopíruje';
+    const days = DAYS.filter((d) => ed.days.includes(d));
+    return sameContent({ program: ed.program, days, slots: ed.slots }, ed.existing) ? '' : 'Nejdřív uložte rozvrh';
   }
 
   /** Why Uložit is disabled, or ''. */
@@ -769,7 +902,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     else if (a === 'split') ed.slots = splitSlot(ed.slots, ed.sel, step);
     else if (a === 'rm') { ed.slots = removeSlot(ed.slots, ed.sel); ed.sel = Math.min(ed.sel > 0 ? ed.sel - 1 : 0, ed.slots.length - 1); }
     else if (a === 'tdn' || a === 'tup') ed.slots = setTemp(ed.slots, ed.sel, ed.slots[ed.sel].temp + (a === 'tdn' ? -0.5 : 0.5));
-    else if (a === 'copy') { this.dispatchEvent(new CustomEvent('hsc-copy', { bubbles: true, composed: true, detail: { valve: ed.valves[0], program: ed.program, schedule: ed.existing } })); return; }
+    else if (a === 'copy') return !ed.existing || this._copyBlock(ed) ? undefined : this._announceCopy({ valve: ed.valves[0], program: ed.program, schedule: ed.existing });
     else if (a === 'reload') {
       const fresh = this._schedules.find((x) => x.id === ed.existing?.id);
       if (fresh?.editable) this._openExisting(fresh); else this._leave();
@@ -781,7 +914,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     this._render(true);
   }
 
-  _leave() { this._view = 'week'; this._ed = this._pick = null; }
+  _leave() { this._view = 'week'; this._ed = this._pick = this._copy = null; }
 
   _saveEditor() {
     const ed = this._ed;
@@ -876,6 +1009,188 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     });
   }
 
+  // ---------- copy ----------
+
+  /** `2 rozvrhy · Výchozí, Dovolená` / `bez rozvrhu`: what a valve has now. */
+  _valveSub(v, names) {
+    const groups = [...groupByProgram(this._schedules, v)].filter(([, g]) => g.length);
+    const n = groups.reduce((a, [, g]) => a + g.length, 0);
+    return n ? `${plural(n, 'rozvrh', 'rozvrhy', 'rozvrhů')} · ${groups.map(([id]) => names[id] || id).join(', ')}` : 'bez rozvrhu';
+  }
+
+  /** Schedules of `source` the copy view can copy: editable and not paused. */
+  _copyPool(source) { return copyable(this._schedules, source); }
+
+  /** The copy button of the week header and of the editor announce `hsc-copy`; the copy view opens unless a listener calls preventDefault. */
+  _announceCopy(detail) {
+    const ev = new CustomEvent('hsc-copy', { bubbles: true, composed: true, cancelable: true, detail });
+    if (this.dispatchEvent(ev)) this._onCopy(ev);
+  }
+
+  _onCopy(e) {
+    if (this._view !== 'week' && this._view !== 'editor') return;
+    const { valve, schedule } = e.detail || {};
+    const source = this._cfg.valveCircuit[valve] ? valve : this._valve;
+    const pool = this._copyPool(source);
+    const one = schedule && pool.find((s) => s.id === schedule.id); // a schedule from the editor: mode "selected", that one preselected
+    this._copy = {
+      source, mode: one ? 'one' : 'valve', programs: [...new Set(pool.map((s) => s.program))], ids: one ? [one.id] : [],
+      targetProgram: 'same', targets: [], conflict: 'replace', prev: this._view, busy: false, progress: '', errors: {},
+    };
+    this._view = 'copy';
+    this._render(true);
+  }
+
+  _copyInput(schedules) {
+    const c = this._copy;
+    return {
+      schedules, source: c.source, mode: c.mode, programs: c.programs, scheduleIds: c.ids, targetProgram: c.targetProgram, targets: c.targets, conflict: c.conflict,
+      programsByValve: this._programInfo().byValve, names: this._programInfo().names,
+    };
+  }
+
+  _copyAction(a, k) {
+    const c = this._copy;
+    if (this._view !== 'copy' || !c) return;
+    if (a === 'cp-back') {
+      if (c.busy) return;
+      this._view = c.prev;
+      this._copy = null;
+      return this._render(true);
+    }
+    if (c.busy) return;
+    const toggle = (arr) => (arr.includes(k) ? arr.filter((x) => x !== k) : [...arr, k]);
+    if (a === 'cp-mode') c.mode = k;
+    else if (a === 'cp-pt') c.programs = toggle(c.programs);
+    else if (a === 'cp-row') c.ids = toggle(c.ids);
+    else if (a === 'cp-tgt') { const t = toggle(c.targets); c.targets = this._allValves().filter((v) => t.includes(v)); }
+    else if (a === 'cp-conf') c.conflict = k;
+    else if (a === 'cp-go') return this._runCopy();
+    c.errors = {};
+    this._render(true);
+  }
+
+  /**
+   * Runs the plan the user saw (`_copy.shown`, set by the last render). The stored schedules are re-read first and the plan
+   * made again from them; when it differs nothing is written. Per valve: the copies are added first, then the replaced
+   * schedules are trimmed / removed, so a valve is never left without schedules. A failure puts that valve back as it was
+   * (its new copies removed, trimmed ones edited back, removed ones added again from their stored versions) and shows its
+   * error; the other valves go through.
+   */
+  async _runCopy() {
+    const c = this._copy, shown = c?.shown;
+    if (!c || c.busy || !shown || !(shown.add.length + shown.edit.length + shown.remove.length)) return;
+    c.busy = true;
+    c.errors = {};
+    c.progress = 'Načítám rozvrhy…';
+    this._writeError = null;
+    this._render(true);
+    let failed = false;
+    try {
+      const fresh = await loadSchedules(this._hass);
+      const plan = planCopy(this._copyInput(fresh));
+      const same = (p) => JSON.stringify([p.add, p.edit, p.remove]);
+      if (same(plan) !== same(shown)) { this._schedules = fresh; throw new Error('Rozvrhy se mezitím změnily, zkontroluj náhled a spusť kopírování znovu'); }
+      const before = new Set(fresh.map((x) => x.id));
+      const stored = (id) => fresh.find((x) => x.id === id);
+      const valves = c.targets.filter((v) => [...plan.add, ...plan.edit].some((m) => m.valve === v) || plan.remove.some((id) => stored(id)?.valve === v));
+      for (const [i, v] of valves.entries()) {
+        c.progress = `Kopíruji ${i + 1} z ${valves.length} hlavic…`;
+        this._render(true);
+        const adds = plan.add.filter((m) => m.valve === v), trimmed = [], removed = [];
+        try {
+          for (const m of adds) await saveSchedule(this._hass, m);
+          for (const m of plan.edit.filter((x) => x.valve === v)) { await saveSchedule(this._hass, m, stored(m.id)); trimmed.push(stored(m.id)); }
+          for (const id of plan.remove.filter((x) => stored(x)?.valve === v)) { await removeSchedule(this._hass, id); removed.push(stored(id)); }
+        } catch (err) {
+          failed = true;
+          c.errors[v] = err?.message || String(err);
+          await this._rollback(before, adds); // before the re-adds below: those may look like the copies
+          try {
+            for (const old of trimmed) await saveSchedule(this._hass, old, old);
+            for (const old of removed) await saveSchedule(this._hass, { ...old, id: undefined }, { raw: old.raw });
+          } catch { /* the original error is the one to show */ }
+        }
+      }
+    } catch (err) {
+      failed = true;
+      this._fail(err);
+    }
+    c.busy = false;
+    c.progress = '';
+    await this._load();
+    if (!failed && this._copy === c) {
+      if (c.prev === 'editor') { this._view = 'editor'; this._copy = null; } // back to the untouched editor, as Zpět
+      else this._leave();
+    }
+    this._render(true);
+  }
+
+  _copyHtml(errHtml) {
+    const c = this._copy, st = this._hass?.states ?? {}, dark = !!this._hass?.themes?.darkMode;
+    const title = (v) => st[v]?.attributes?.friendly_name || v;
+    const names = this._programInfo().names;
+    const pool = this._copyPool(c.source);
+    const srcCircuit = this._cfg.circuits.find((x) => x.id === this._cfg.valveCircuit[c.source]);
+    const ids = [...new Set([...this._programs(srcCircuit).list.map((p) => p.id), ...pool.map((s) => s.program)])];
+    const pname = (id) => names[id] || id;
+    const plan = planCopy(this._copyInput(this._schedules));
+    c.shown = plan; // what the user sees is what Kopírovat runs
+    const changes = plan.add.length + plan.edit.length + plan.remove.length;
+    const busy = c.busy, dis = busy ? 'disabled' : '';
+    const tab = (a, k, label, on) => `<button type="button" class="tab" data-a="${a}" data-k="${k}" aria-pressed="${on}" ${dis}>${label}</button>`;
+    const tile = (a, k, on, off, ic, cls, name, sub) => `<button type="button" class="tile${cls}" data-a="${a}" data-k="${esc(k)}" aria-pressed="${on}" ${off || busy ? 'disabled' : ''}>
+      <span class="tic${cls.includes('cal') ? ' cal' : ''}">${icon(ic, 18)}</span><span class="tx"><b>${esc(name)}</b>${sub}</span></button>`;
+    const sec = (t) => `<span class="sec">${esc(t)}</span>`;
+
+    let which;
+    if (!pool.length) which = `<div class="col">${sec('Hlavice nemá žádný rozvrh, který jde kopírovat.')}</div>`;
+    else if (c.mode === 'valve') {
+      which = `<div class="col"><span class="label">Které programy</span><div class="grid2">${ids.map((p) => {
+        const n = pool.filter((s) => s.program === p).length, on = n > 0 && c.programs.includes(p);
+        return tile('cp-pt', p, on, !n, on ? 'checkCircle' : 'calendarWeek', ' cal', pname(p), sec(n ? plural(n, 'rozvrh', 'rozvrhy', 'rozvrhů') : p === 'auto' ? 'bez rozvrhu' : 'nemá vlastní · jede podle Výchozího'));
+      }).join('')}</div></div>`;
+    } else {
+      const rows = ids.flatMap((p) => pool.filter((s) => s.program === p));
+      const bar = (s) => `<span class="bar mini">${barSegments(s).map((x) => `<span class="seg" style="flex:${x.end - x.start} 1 0;--c:${tempColor(x.temp, dark)}"></span>`).join('')}</span>`;
+      which = `<div class="col"><span class="label">Které rozvrhy</span>${rows.map((s) => {
+        const on = c.ids.includes(s.id);
+        return tile('cp-row', s.id, on, false, on ? 'checkCircle' : 'calendarWeek', ' wide cal', `${pname(s.program)} · ${daysLabel(s.days)}`, bar(s));
+      }).join('')}
+        <label class="tile sel"><span class="tx"><span class="sec">Do programu</span><b>${esc(c.targetProgram === 'same' ? 'Stejného jako zdroj' : pname(c.targetProgram))}</b></span>${icon('chevronDown')}
+          <select data-a="cp-prog" aria-label="Do programu" ${dis}><option value="same"${c.targetProgram === 'same' ? ' selected' : ''}>Stejného jako zdroj</option>${
+            ids.map((p) => `<option value="${esc(p)}"${p === c.targetProgram ? ' selected' : ''}>${esc(pname(p))}</option>`).join('')}</select></label></div>`;
+    }
+
+    const seen = new Set([c.source]); // a climate listed in two circuits is one tile
+    const circuits = this._cfg.circuits.map((ci) => `<div class="col"><span class="label">Na hlavice · ${esc(circuitName(this._hass, ci))}</span><div class="grid2">${ci.valves.map((v) => {
+      if (v === c.source) return tile('cp-tgt', v, false, true, 'contentCopy', ' cal', title(v), sec('zdroj'));
+      if (seen.has(v)) return '';
+      seen.add(v);
+      const on = c.targets.includes(v);
+      return tile('cp-tgt', v, on, false, on ? 'checkCircle' : 'fire', '', title(v), sec(this._valveSub(v, names)));
+    }).join('')}</div></div>`).join('');
+
+    const notes = c.targets.length ? c.targets.map((v) => `<span class="sec"><b>${esc(title(v))}:</b> ${esc(plan.notes[v] || '')}</span>`).join('') : sec('Vyber aspoň jednu hlavici.');
+    const errs = Object.entries(c.errors).map(([v, m]) => `<div class="err">Chyba: ${esc(title(v))}: ${esc(m)}</div>`).join('');
+    const go = busy ? c.progress : c.targets.length ? `Kopírovat na ${plural(c.targets.length, 'hlavici', 'hlavice', 'hlavic')}` : 'Kopírovat';
+    return `<div class="head">
+        <button type="button" class="round" data-a="cp-back" data-k="" aria-label="Zpět" ${dis}>${icon('chevronLeft')}</button>
+        <div class="t"><span class="sec">Z hlavice ${esc(title(c.source))}</span><span class="title">Kopírovat rozvrh</span></div>
+      </div>
+      ${errHtml}${errs}
+      <div class="tabs">${tab('cp-mode', 'valve', 'Celá hlavice', c.mode === 'valve')}${tab('cp-mode', 'one', 'Vybrané rozvrhy', c.mode === 'one')}</div>
+      ${which}
+      ${circuits}
+      <div class="col"><span class="label">Když cíl už rozvrh má</span>
+        <div class="tabs">${tab('cp-conf', 'replace', 'Nahradit', c.conflict === 'replace')}${tab('cp-conf', 'fill', 'Jen doplnit', c.conflict === 'fill')}</div>
+        <div class="note stack" role="status">${notes}</div></div>
+      <div class="grid2">
+        <button type="button" class="btn wide" data-a="cp-back" data-k="c" ${dis}>Zrušit</button>
+        <button type="button" class="btn primary wide" data-a="cp-go" data-k="" ${busy || !changes ? 'disabled' : ''}>${busy ? '' : icon('contentCopy')}${esc(go)}</button>
+      </div>`;
+  }
+
   // ---------- render ----------
 
   _programs(c = this._circuit()) {
@@ -950,12 +1265,13 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     const wrap = (inner, tone, cls = '') => `<style>${STYLE}</style><ha-card><div class="card${dark ? ' dark' : ''}${cls}" style="--tone:${tone || 'transparent'}">${inner}</div></ha-card>`;
     let html;
     if (this._view === 'editor' && this._ed) html = wrap(this._editorHtml(dark, errHtml), tempColor(this._ed.slots[this._ed.sel].temp, dark));
+    else if (this._view === 'copy' && this._copy) html = wrap(this._copyHtml(errHtml), null);
     else if (this._view === 'picker' && this._pick) {
       const plist = this._pickerPrograms();
       if (!plist.some((p) => p.id === this._pick.program)) this._pick.program = 'auto';
       html = wrap(this._pickerHtml(plist, errHtml), null);
     } else html = wrap(`
-      <div class="head"><div class="t"><span class="sec">${esc(circuitName(hass, circuit))}</span><b>${esc(title)}</b></div>${picker}</div>
+      <div class="head"><div class="t"><span class="sec">${esc(circuitName(hass, circuit))}</span><b>${esc(title)}</b></div>${picker}${this._allValves().length > 1 ? `<button type="button" class="round" data-a="copyOpen" aria-label="Kopírovat na jiné hlavice">${icon('contentCopy')}</button>` : ''}</div>
       ${errHtml}
       <div class="now${ns.muted || ns.tone == null ? ' muted' : ''}" data-kind="${ns.kind}">
         <span class="ic${toneCss ? ' tone' : ''}">${icon(ns.icon)}</span>
@@ -998,7 +1314,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     const names = this._programs().list;
     const valveTitle = ed.valves.map((v) => states[v]?.attributes?.friendly_name || v).join(', ');
     const progName = names.find((p) => p.id === ed.program)?.name || ed.program;
-    const block = this._saveBlock(ed), busy = this._busy.has('ed');
+    const block = this._saveBlock(ed), busy = this._busy.has('ed'), noCopy = this._copyBlock(ed);
     const btn = (a, label, svg, dis = false) => `<button type="button" class="step" data-a="${a}" data-k="" aria-label="${label}" ${dis ? 'disabled' : ''}>${svg}</button>`;
     const stepTile = (label, value, dn, up, canMove) => `<div class="ttile"><div><span class="sec">${label}</span><b>${fmtTime(value)}</b></div>
       <div class="pair">${btn(dn, `${label} o ${step} minut dřív`, icon('minus', 18), !canMove)}${btn(up, `${label} o ${step} minut později`, icon('plus', 18), !canMove)}</div></div>`;
@@ -1012,9 +1328,10 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     return `<div class="head">
         <button type="button" class="round" data-a="back" data-k="" aria-label="Zpět" ${busy ? 'disabled' : ''}>${icon('chevronLeft')}</button>
         <div class="t"><span class="sec">${esc(valveTitle)} · ${esc(progName)}</span><span class="title">${ed.existing ? 'Upravit rozvrh' : 'Nový rozvrh'}</span></div>
-        ${ed.existing ? `<button type="button" class="round" data-a="copy" data-k="" aria-label="Kopírovat tento rozvrh">${icon('contentCopy')}</button>
+        ${ed.existing ? `<button type="button" class="round" data-a="copy" data-k="" aria-label="${esc(noCopy || 'Kopírovat tento rozvrh')}" title="${esc(noCopy)}" ${noCopy ? 'disabled' : ''}>${icon('contentCopy')}</button>
         <button type="button" class="round" data-a="del" data-k="" aria-label="Smazat rozvrh" ${busy ? 'disabled' : ''}>${icon('deleteOutline')}</button>` : ''}
       </div>
+      ${noCopy ? `<span class="sec" role="status">${esc(noCopy)}</span>` : ''}
       ${ed.confirm ? `<div class="confirm" role="alertdialog" aria-label="Smazat rozvrh"><span>Smazat rozvrh ${esc(daysLabel(ed.existing?.days ?? ed.days))}?</span>
         <button type="button" class="btn small" data-a="delno" data-k="">Zrušit</button><button type="button" class="btn small danger" data-a="delok" data-k="" ${busy ? 'disabled' : ''}>Smazat</button></div>` : ''}
       ${errHtml}
@@ -1067,9 +1384,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
       if (seen.has(v)) return '';
       seen.add(v);
       const on = pick.valves.includes(v);
-      const groups = [...groupByProgram(this._schedules, v)].filter(([, g]) => g.length);
-      const n = groups.reduce((a, [, g]) => a + g.length, 0);
-      const sub = n ? `${plural(n, 'rozvrh', 'rozvrhy', 'rozvrhů')} · ${groups.map(([id]) => names[id] || id).join(', ')}` : 'bez rozvrhu';
+      const sub = this._valveSub(v, names);
       return `<button type="button" class="tile" data-a="pv" data-k="${esc(v)}" aria-pressed="${on}"><span class="tic">${icon(on ? 'checkCircle' : 'fire', 18)}</span>
         <span class="tx"><b>${esc(states[v]?.attributes?.friendly_name || v)}</b><span class="sec">${esc(sub)}</span></span></button>`;
     };

@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import {
   normalizeConfig, circuitName, parseSchedule, toPayload, effective, slotAt, groupByProgram, daysLabel, tempColor, fmtTemp, fmtTime,
   loadSchedules, saveSchedule, removeSchedule, nowState, DASH, isFallbackProgram, barSegments, slotsSummary,
-  normalizeSlots, splitSlot, removeSlot, moveBoundary, setTemp, daysConflict,
+  normalizeSlots, splitSlot, removeSlot, moveBoundary, setTemp, daysConflict, planCopy, copyable,
 } from '../dist/heating-schedule-card.js';
 
 process.env.TZ = 'Europe/Prague'; // the DST test needs a zone with a spring-forward day
@@ -454,4 +454,129 @@ test('toPayload after editing: starts only, last stop 23:59, name and dates kept
   assert.equal(body.start_date, '2026-01-01');
   assert.deepEqual(body.tags, ['kitchen_valve', 'program:auto']);
   assert.equal(body.schedule_id, 'k');
+});
+
+// ---------- planCopy ----------
+
+const SRC = 'climate.src', A = 'climate.a', B = 'climate.b';
+const WORK = ['mon', 'tue', 'wed', 'thu', 'fri'], ALL = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
+let seq = 0;
+/** A parsed schedule of `valve`: slots = [[startMin, temp]...] (each ends where the next starts). */
+const mk = (valve, program, days, slots = [[0, 20]], extra = {}) => {
+  const hm = (m) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}:00`;
+  const id = `p${++seq}`;
+  return parseSchedule({
+    schedule_id: id, entity_id: `switch.${id}`, weekdays: days, repeat_type: 'repeat', tags: [`program:${program}`, ...(extra.tags ?? [])], name: null,
+    timeslots: slots.map(([start, t], i) => ({ start: hm(start), stop: i === slots.length - 1 ? '23:59:00' : hm(slots[i + 1][0]), conditions: [],
+      actions: [{ service: 'climate.set_temperature', entity_id: valve, service_data: { temperature: t } }] })),
+    ...(extra.item ?? {}),
+  });
+};
+const names = { auto: 'Výchozí', even: 'Sudý', vac: 'Dovolená' };
+const all = { [SRC]: ['auto', 'even', 'vac'], [A]: ['auto', 'even', 'vac'], [B]: ['auto', 'even'] };
+const plan = (schedules, o) => planCopy({ schedules, source: SRC, programsByValve: all, names, ...o });
+const shape = (p) => ({ add: p.add.map((m) => [m.valve, m.program, m.days.join(), m.slots.map((x) => x.start + '/' + x.temp).join()]), edit: p.edit.map((m) => [m.id, m.days.join()]), remove: p.remove });
+
+test('planCopy whole valve + replace: target programs are replaced, others stay, source and duplicates dropped', () => {
+  const s1 = mk(SRC, 'auto', WORK, [[0, 18], [360, 21]]), s2 = mk(SRC, 'auto', ['sat', 'sun'], [[420, 22]]), s3 = mk(SRC, 'even', ALL);
+  const a1 = mk(A, 'auto', ALL), a2 = mk(A, 'vac', ALL);
+  const p = plan([s1, s2, s3, a1, a2], { mode: 'valve', programs: ['auto', 'even'], targets: [A, B, A, SRC], conflict: 'replace' });
+  assert.deepEqual(shape(p), {
+    add: [[A, 'auto', WORK.join(), '0/18,360/21'], [A, 'auto', 'sat,sun', '420/22'], [A, 'even', ALL.join(), '0/20'],
+      [B, 'auto', WORK.join(), '0/18,360/21'], [B, 'auto', 'sat,sun', '420/22'], [B, 'even', ALL.join(), '0/20']], edit: [], remove: [a1.id],
+  });
+  assert.equal(p.add[1].slots[0].start, 420, 'a first start after 00:00 is kept, no 00:00 slot invented');
+  assert.deepEqual(Object.keys(p.notes), [A, B]);
+  assert.equal(p.notes[A], 'nahradí Výchozí (1 rozvrh); ostatní programy doplní.');
+  assert.equal(p.notes[B], 'dostane 3 rozvrhy, nic se nepřepíše.');
+  const miss = plan([s3, mk(SRC, 'vac', ALL)], { mode: 'valve', programs: ['even', 'vac'], targets: [B] });
+  assert.equal(miss.notes[B], 'přeskočeno, program Dovolená v jeho okruhu není.');
+  assert.deepEqual(shape(miss), { add: [], edit: [], remove: [] });
+});
+
+test('planCopy whole valve + fill: a program the target has is kept', () => {
+  const s1 = mk(SRC, 'auto', ALL), s2 = mk(SRC, 'vac', ALL);
+  const a1 = mk(A, 'auto', ['mon']);
+  const p = plan([s1, s2, a1], { mode: 'valve', programs: ['auto', 'vac'], targets: [A], conflict: 'fill' });
+  assert.deepEqual(shape(p), { add: [[A, 'vac', ALL.join(), '0/20']], edit: [], remove: [] });
+  assert.equal(p.notes[A], 'Výchozí nechá být, doplní jen Dovolená.');
+  const none = plan([s1, a1], { mode: 'valve', programs: ['auto'], targets: [A], conflict: 'fill' });
+  assert.deepEqual(shape(none), { add: [], edit: [], remove: [] });
+  assert.equal(none.notes[A], 'Výchozí nechá být, doplní jen nic.');
+});
+
+test('planCopy selected + replace: copied weekdays leave the target schedules, a schedule without days is removed', () => {
+  const s1 = mk(SRC, 'auto', WORK, [[0, 18], [360, 21]]);
+  const full = mk(A, 'auto', ALL), exact = mk(B, 'auto', WORK, [[0, 5]]);
+  const p = plan([s1, full, exact], { mode: 'one', scheduleIds: [s1.id], targets: [A, B], conflict: 'replace' });
+  assert.deepEqual(shape(p), { add: [[A, 'auto', WORK.join(), '0/18,360/21'], [B, 'auto', WORK.join(), '0/18,360/21']], edit: [[full.id, 'sat,sun']], remove: [exact.id] });
+  assert.deepEqual(p.edit[0].slots, full.slots);
+  assert.equal(p.notes[A], 'v Výchozí přepíše stejné dny, ostatní dny zůstanou.');
+  const clean = plan([s1], { mode: 'one', scheduleIds: [s1.id], targets: [A], conflict: 'replace' });
+  assert.equal(clean.notes[A], 'dostane 1 rozvrh, nic se nepřepíše.');
+});
+
+test('planCopy selected + fill: only the weekdays the target has free; nothing free = no copy', () => {
+  const s1 = mk(SRC, 'auto', WORK);
+  const a1 = mk(A, 'auto', ['mon', 'tue', 'wed']), b1 = mk(B, 'auto', ALL);
+  const p = plan([s1, a1, b1], { mode: 'one', scheduleIds: [s1.id], targets: [A, B], conflict: 'fill' });
+  assert.deepEqual(shape(p), { add: [[A, 'auto', 'thu,fri', '0/20']], edit: [], remove: [] });
+  assert.equal(p.notes[A], 'doplní jen dny, které v Výchozí ještě nemá.');
+  assert.equal(p.notes[B], 'nic nedoplní, dny už v Výchozí má.');
+});
+
+test('planCopy selected: target program, program missing in the circuit, two copies never share a weekday', () => {
+  const s1 = mk(SRC, 'auto', WORK), s2 = mk(SRC, 'even', ['fri', 'sat']);
+  const p = plan([s1, s2], { mode: 'one', scheduleIds: [s1.id, s2.id], targetProgram: 'vac', targets: [A, B], conflict: 'replace' });
+  assert.deepEqual(shape(p), { add: [[A, 'vac', WORK.join(), '0/20'], [A, 'vac', 'sat', '0/20']], edit: [], remove: [] });
+  assert.equal(p.notes[B], 'přeskočeno, program Dovolená v jeho okruhu není.');
+});
+
+test('planCopy: read-only and paused schedules are never copied; a read-only target schedule is never touched', () => {
+  const ro = mk(SRC, 'auto', WORK, [[0, 20]], { item: { repeat_type: 'single' } });
+  const paused = mk(SRC, 'auto', ['sat'], [[0, 20]], { tags: ['paused'] });
+  const ok = mk(SRC, 'even', ALL);
+  const aRo = mk(A, 'even', ['mon'], [[0, 20]], { item: { repeat_type: 'single' } });
+  const aRo2 = mk(A, 'auto', ['mon'], [[0, 20]], { item: { repeat_type: 'single' } });
+  assert.equal(aRo.editable, false);
+  const none = plan([ro, paused], { mode: 'valve', programs: ['auto'], targets: [A] });
+  assert.deepEqual(shape(none), { add: [], edit: [], remove: [] });
+  assert.equal(none.notes[A], 'není co kopírovat.');
+  const w = plan([ok, aRo], { mode: 'valve', programs: ['even'], targets: [A], conflict: 'replace' });
+  assert.deepEqual(shape(w), { add: [], edit: [], remove: [] }, 'whole program skipped: it holds a read-only schedule');
+  assert.match(w.notes[A], /jen ke čtení/);
+  const o = plan([ok, aRo, aRo2], { mode: 'one', scheduleIds: [ok.id], targets: [A], conflict: 'replace' });
+  assert.deepEqual(shape(o), { add: [[A, 'even', 'tue,wed,thu,fri,sat,sun', '0/20']], edit: [], remove: [] }, 'the read-only Monday stays taken');
+});
+
+test('planCopy: an edited target schedule keeps its slots, toPayload keeps its name and dates', () => {
+  const s1 = mk(SRC, 'auto', ['mon']);
+  const a1 = mk(A, 'auto', ['mon', 'tue'], [[0, 17], [480, 22]], { item: { name: 'Můj', start_date: '2026-01-01' } });
+  const p = plan([s1, a1], { mode: 'one', scheduleIds: [s1.id], targets: [A], conflict: 'replace' });
+  const body = toPayload(p.edit[0], a1);
+  assert.deepEqual([body.schedule_id, body.name, body.start_date, body.weekdays], [a1.id, 'Můj', '2026-01-01', ['tue']]);
+  assert.deepEqual(body.timeslots.map((t) => t.start), ['00:00:00', '08:00:00']);
+});
+
+test('planCopy: weekdays two selected schedules both want go to the first, the note names the rest', () => {
+  const s1 = mk(SRC, 'auto', WORK), s2 = mk(SRC, 'even', ['tue', 'wed', 'thu', 'fri', 'sat']);
+  const p = plan([s1, s2], { mode: 'one', scheduleIds: [s1.id, s2.id], targetProgram: 'vac', targets: [A], conflict: 'replace' });
+  assert.deepEqual(shape(p).add, [[A, 'vac', WORK.join(), '0/20'], [A, 'vac', 'sat', '0/20']]);
+  assert.equal(p.notes[A], 'Út–Pá z programu Sudý se nekopírují, Výchozí je už má.');
+});
+
+test('planCopy: a read-only target schedule gets only its own note, it is not a "hit"', () => {
+  const s1 = mk(SRC, 'auto', WORK);
+  const aRo = mk(A, 'auto', ['mon'], [[0, 20]], { item: { repeat_type: 'single' } });
+  const p = plan([s1, aRo], { mode: 'one', scheduleIds: [s1.id], targets: [A], conflict: 'replace' });
+  assert.equal(p.notes[A], 'Výchozí má rozvrh jen ke čtení, ten zůstane.');
+  assert.deepEqual(shape(p).add, [[A, 'auto', 'tue,wed,thu,fri', '0/20']]);
+  const whole = plan([s1, aRo], { mode: 'valve', programs: ['auto'], targets: [A], conflict: 'fill' });
+  assert.equal(whole.notes[A], 'Výchozí má rozvrh jen ke čtení, ten zůstane.');
+});
+
+test('copyable: editable, not paused, single-valve schedules of the source', () => {
+  const ok = mk(SRC, 'auto', ALL), paused = mk(SRC, 'auto', ALL, [[0, 20]], { tags: ['paused'] });
+  const ro = mk(SRC, 'auto', ALL, [[0, 20]], { item: { repeat_type: 'single' } }), other = mk(A, 'auto', ALL);
+  assert.deepEqual(copyable([ok, paused, ro, other], SRC).map((x) => x.id), [ok.id]);
 });

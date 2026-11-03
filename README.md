@@ -2,7 +2,7 @@
 
 A Home Assistant card for the weekly heating schedules of climate valves, written in Czech. Schedules are stored by [scheduler-component](https://github.com/nielsfaber/scheduler-component) (no own integration); the card reads them, shows what a valve does now and writes `scheduler/add`, `edit` and `remove`. The schedule switches stay **off**: the heating automation alone decides what a valve gets.
 
-Status: week view (now tile with the heating automation's state, program chips, temperature-coloured 24 h bars, fallback to Výchozí, per-schedule "Aktivní" pause) and the schedule editor (weekdays, 24 h bar with selectable slots, start / end ± `time_step`, split / delete slot, Bento dial ±0.5 °C, save / cancel / delete; a card without `valve` first asks for which valves a new schedule is made) on the data layer (v0.1.0 in progress). Copy follows.
+Status: week view (now tile with the heating automation's state, program chips, temperature-coloured 24 h bars, fallback to Výchozí, per-schedule "Aktivní" pause) and the schedule editor (weekdays, 24 h bar with selectable slots, start / end ± `time_step`, split / delete slot, Bento dial ±0.5 °C, save / cancel / delete; a card without `valve` first asks for which valves a new schedule is made) on the data layer (v0.1.0 in progress). Copy to other valves (whole valve or selected schedules, Nahradit / Jen doplnit, with a per-valve preview).
 
 ## Installation
 
@@ -35,7 +35,7 @@ A day uses the running program's non-paused schedules, else `auto`'s (same rules
 ## Events
 
 - `hsc-edit` (`detail: {valve, program, schedule | null}`, cancelable): a row or "Přidat dny s jiným rozvrhem" was tapped; the card opens its editor unless a listener calls `preventDefault()`.
-- `hsc-copy` (`detail: {valve, program, schedule}`): the copy button of the editor (handled by the copy view, not yet there).
+- `hsc-copy` (`detail: {valve, program, schedule | null}`, cancelable): the copy button of the week header or of the editor; the card opens its copy view unless a listener calls `preventDefault()`. Only editable, non-paused schedules of the source valve are copied; a target valve whose circuit lacks the target program is skipped.
 
 ## Tests
 
@@ -45,7 +45,7 @@ Pure functions are exported from the module:
 node --test tests/*.test.mjs
 ```
 
-Browser check with a fake `hass` (`tests/fixtures/schedules.json` = real items from the dev HA). Screenshots of the canvas layouts with a fixed clock: `tests/dom.html?shot=week|fallback|states|editor|picker` (`&dark=1`, `&w=390`).
+Browser check with a fake `hass` (`tests/fixtures/schedules.json` = real items from the dev HA). Screenshots of the canvas layouts with a fixed clock: `tests/dom.html?shot=week|fallback|states|editor|picker|copy-valve|copy-one` (`&dark=1`, `&w=390`).
 
 ```sh
 python3 -m http.server 8765 &

@@ -1,4 +1,4 @@
-// Screenshot pages for tests/dom.html?shot=week|fallback|states|editor|picker (&dark=1, &w=<px>): the canvas data (Main2.dc.html) in a
+// Screenshot pages for tests/dom.html?shot=week|fallback|states|editor|picker|copy-valve|copy-one (&dark=1, &w=<px>): the canvas data (Main2.dc.html) in a
 // fake hass with a fixed clock (Monday 14:20), to compare the card with the artboards by eye.
 const q = new URLSearchParams(location.search);
 const shot = q.get('shot'), dark = q.has('dark'), width = Number(q.get('w')) || 580;
@@ -12,9 +12,9 @@ await import('../dist/heating-schedule-card.js');
 
 const V = 'climate.living_valve', C = 'heating_circuit_1';
 const t = (h) => `${String(Math.floor(h)).padStart(2, '0')}:${String(Math.round((h % 1) * 60)).padStart(2, '0')}:00`;
-const item = (id, weekdays, program, slots) => ({
+const item = (id, weekdays, program, slots, valve = V) => ({
   schedule_id: id, entity_id: `switch.schedule_${id}`, weekdays, repeat_type: 'repeat', tags: [`program:${program}`], name: null,
-  timeslots: slots.map(([a, b, temp]) => ({ start: t(a), stop: b === 24 ? '23:59:00' : t(b), conditions: [], actions: [{ service: 'climate.set_temperature', entity_id: V, service_data: { temperature: temp } }] })),
+  timeslots: slots.map(([a, b, temp]) => ({ start: t(a), stop: b === 24 ? '23:59:00' : t(b), conditions: [], actions: [{ service: 'climate.set_temperature', entity_id: valve, service_data: { temperature: temp } }] })),
 });
 const ITEMS = [
   item('a1', ['mon', 'tue', 'wed', 'thu', 'fri'], 'auto', [[0, 6, 18], [6, 8, 21.5], [8, 16, 19], [16, 22, 21.5], [22, 24, 18]]),
@@ -23,6 +23,7 @@ const ITEMS = [
   item('e2', ['sat', 'sun'], 'even', [[0, 8, 18.5], [8, 23, 21.5], [23, 24, 18.5]]),
   item('v1', ['daily'], 'vacation', [[0, 24, 16]]),
 ];
+let items = ITEMS; // the copy shots add schedules of the other valves
 const PROGRAMS = { programs: ['auto', 'odd', 'even', 'vacation'], program_names: { auto: 'Výchozí', odd: 'Lichý týden', even: 'Sudý týden', vacation: 'Dovolená' } };
 
 const states = (patch = {}) => ({
@@ -55,11 +56,11 @@ const mk = async (label, patch, pick, cfg = { valve: V }) => {
   if (label) wrap.insertAdjacentHTML('beforebegin', `<div style="font:600 12px sans-serif;margin:8px 0 4px">${label}</div>`);
   const hass = {
     themes: { darkMode: dark }, states: states(patch),
-    callWS: async () => ITEMS, callApi: async () => {}, callService: async () => {},
+    callWS: async () => items, callApi: async () => {}, callService: async () => {},
     connection: { subscribeMessage: async () => () => {} },
   };
   const card = document.createElement('heating-schedule-card');
-  card.setConfig({ ...cfg, circuits: [{ id: C, name: 'Přízemí', valves: [V, 'climate.kitchen_valve'] }] });
+  card.setConfig({ circuits: [{ id: C, name: 'Přízemí', valves: [V, 'climate.kitchen_valve'] }], ...cfg });
   card.hass = hass;
   wrap.append(card);
   await new Promise((r) => setTimeout(r, 150));
@@ -81,4 +82,26 @@ else if (shot === 'editor') { // Editor1: Výchozí, Po–Pá, the 16:00–22:00
   c.shadowRoot.querySelector('[data-a="add"]').click();
   c.shadowRoot.querySelector('[data-a="pv"][data-k="climate.kitchen_valve"]').click();
 } else if (shot === 'states') for (const [k, p] of Object.entries(STATES)) await mk(k, p);
+// Copy1 / Copy2 (canvas CopyValve2 / CopyOne2): Obývák -> Kuchyň + Ložnice, two circuits
+const C2 = 'heating_circuit_2';
+const OTHERS = { kitchen: ['climate.kitchen_valve', 'Kuchyň'], workroom: ['climate.workroom_valve', 'Pracovna'], hall: ['climate.hall_valve', 'Chodba'],
+  kids: ['climate.kids_valve', 'Dětský pokoj'], bedroom: ['climate.bedroom_valve', 'Ložnice'], bath: ['climate.bath_valve', 'Koupelna'] };
+const copyShot = async (pre) => {
+  const WK = ['mon', 'tue', 'wed', 'thu', 'fri'], WE = ['sat', 'sun'], ALL = [...WK, ...WE];
+  const two = (id, v, prog) => [item(`${id}1`, WK, prog, [[0, 6, 18], [6, 22, 21], [22, 24, 18]], v), item(`${id}2`, WE, prog, [[0, 24, 20]], v)];
+  items = [...ITEMS, ...two('k', OTHERS.kitchen[0], 'auto'), item('h1', ALL, 'auto', [[0, 24, 19]], OTHERS.hall[0]),
+    ...two('d', OTHERS.kids[0], 'auto'), item('d3', ALL, 'vacation', [[0, 24, 16]], OTHERS.kids[0]),
+    ...two('b', OTHERS.bedroom[0], 'auto'), ...two('w', OTHERS.bath[0], 'auto'), item('w3', WK, 'even', [[0, 24, 21]], OTHERS.bath[0])];
+  const names = Object.fromEntries(Object.values(OTHERS).map(([id, n]) => [id, { state: 'heat', attributes: { friendly_name: n, temperature: 20 } }]));
+  const patch = { ...names, [`binary_sensor.heating_state_${C2}`]: { state: 'on', attributes: { title: 'Patro' } }, [`sensor.heating_program_${C2}`]: { state: 'auto', attributes: PROGRAMS } };
+  const cfg = { valve: V, circuits: [{ id: C, name: 'Přízemí', valves: [V, OTHERS.kitchen[0], OTHERS.workroom[0], OTHERS.hall[0]] }, { id: C2, name: 'Patro', valves: [OTHERS.kids[0], OTHERS.bedroom[0], OTHERS.bath[0]] }] };
+  const c = await mk('', patch, null, cfg);
+  const q = (sel) => c.shadowRoot.querySelector(sel);
+  q('[data-a="copyOpen"]').click();
+  q(`[data-a="cp-tgt"][data-k="${OTHERS.kitchen[0]}"]`).click();
+  q(`[data-a="cp-tgt"][data-k="${OTHERS.bedroom[0]}"]`).click();
+  pre(q);
+};
+if (shot === 'copy-valve') await copyShot((q) => { q('[data-a="cp-pt"][data-k="vacation"]').click(); });
+else if (shot === 'copy-one') await copyShot((q) => { q('[data-a="cp-mode"][data-k="one"]').click(); q('[data-a="cp-row"][data-k="a1"]').click(); });
 document.title = `shot ${shot}`;
