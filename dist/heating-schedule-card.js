@@ -1,6 +1,6 @@
 // heating-schedule-card: weekly heating schedules of climate valves, stored by scheduler-component.
 // One plain ES module: no build step, no dependencies. Pure functions are exported for `node --test`.
-const VERSION = '0.1.0';
+const VERSION = '0.1.1';
 
 export const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_LABELS = { mon: 'Po', tue: 'Út', wed: 'St', thu: 'Čt', fri: 'Pá', sat: 'So', sun: 'Ne' };
@@ -65,6 +65,28 @@ export function normalizeConfig(config) {
   const timeStep = config.time_step ?? 15;
   if (!(timeStep > 0) || 1440 % timeStep) fail('`time_step` must be a positive divisor of 1440');
   return { valve, circuits: out, timeStep, valveCircuit };
+}
+
+/** Heating circuits found in the states (`sensor.heating_schedule_<id>` with a `targets` attribute) not yet in `cfg`; a valve stays in one circuit. */
+export function discoverCircuits(states, cfg) {
+  const out = [], seen = new Set(Object.keys(cfg.valveCircuit));
+  for (const [e, st] of Object.entries(states || {})) {
+    const m = /^sensor\.heating_schedule_(.+)$/.exec(e), t = st?.attributes?.targets;
+    if (!m || !t || typeof t !== 'object' || cfg.circuits.some((c) => c.id === m[1])) continue;
+    const valves = Object.keys(t).filter((v) => v.startsWith('climate.') && !seen.has(v));
+    valves.forEach((v) => seen.add(v));
+    if (valves.length) out.push({ id: m[1], name: null, valves });
+  }
+  return out;
+}
+
+/** `cfg` plus the discovered circuits. */
+export function withDiscovered(cfg, states) {
+  const found = discoverCircuits(states, cfg);
+  if (!found.length) return cfg;
+  const valveCircuit = { ...cfg.valveCircuit };
+  found.forEach((c) => c.valves.forEach((v) => { valveCircuit[v] = c.id; }));
+  return { ...cfg, circuits: [...cfg.circuits, ...found], valveCircuit };
 }
 
 /** Circuit title: configured name, else the `title` of binary_sensor.heating_state_<id>, else the id. */
@@ -162,7 +184,7 @@ export function effective(schedules, valve, program, day) {
 const slotsOf = (list) => list.flatMap((s) => s.slots.map((x) => ({ ...x, schedule: s }))).sort((a, b) => a.start - b.start);
 
 /**
- * The slot a valve follows at `date` -> {temp, start, end, fromYesterday, next: {start, temp, tomorrow} | null}.
+ * The slot a valve follows at `date` -> {temp, start, end, fromYesterday, next: {start, temp, tomorrow, days} | null}.
  * Latest start <= now today, else the last slot of yesterday's schedules (the evening slot holds past midnight),
  * else today's own last slot (as heating does). `start` / `end` are minutes of the day the slot belongs to.
  */
@@ -178,12 +200,16 @@ export function slotAt(schedules, valve, program, date) {
   const cur = today.filter((s) => s.start <= now).pop();
   const pick = cur || yesterday[yesterday.length - 1] || today[today.length - 1];
   if (!pick) return null;
-  const nextToday = today.find((s) => s.start > now);
-  const nxt = nextToday || day(1)[0];
+  // next = the next slot with another temperature (up to 7 days ahead); same-temperature slots are no change
+  let nxt = null, days = 0;
+  for (let k = 0; k <= 7 && !nxt; k++) {
+    nxt = (k ? day(k) : today.filter((s) => s.start > now)).find((s) => s.temp !== pick.temp) || null;
+    days = k;
+  }
   return {
     temp: pick.temp, start: pick.start, end: pick.end, fromYesterday: !cur && yesterday.includes(pick),
     schedule: pick.schedule, isFallback: pick.isFallback,
-    next: nxt ? { start: nxt.start, temp: nxt.temp, tomorrow: !nextToday } : null,
+    next: nxt ? { start: nxt.start, temp: nxt.temp, tomorrow: days === 1, days } : null,
   };
 }
 
@@ -403,7 +429,8 @@ export function nowState({ states = {}, circuit, valve, schedules, program, now 
   const slot = slotAt(schedules, valve, program, now);
   const sched = slot?.temp ?? attrOf(states, `sensor.heating_schedule_${circuit}`, 'targets')?.[valve] ?? null;
   const schedTxt = sched == null ? null : `${fmtTemp(sched)} °C`;
-  const at = (m, tomorrow) => `${tomorrow ? 'zítra v ' : 'v '}${fmtTime(m)}`;
+  const when = (n) => (n.days > 1 ? `${DAY_LABELS[dow(new Date(now.getFullYear(), now.getMonth(), now.getDate() + n.days))]} ` : n.days ? 'zítra ' : '');
+  const at = (n) => `${when(n)}v ${fmtTime(n.start)}`;
   const tile = (kind, icon, text, sub, temp, extra = {}) => ({ kind, icon, text, sub, temp, unit: temp === DASH ? '' : '°C', tone: null, muted: false, btn: '', ...extra });
   const wouldBe = schedTxt ? ` · teď by bylo ${schedTxt}` : '';
 
@@ -436,7 +463,7 @@ export function nowState({ states = {}, circuit, valve, schedules, program, now 
   if (planned != null && Number.isFinite(target) && attrOf(states, valve, 'temperature') != null && Math.abs(target - planned) > 0.05) {
     const n = slot?.next;
     return tile('manual', 'pencil', `Ručně ${fmtTemp(target)} °C`,
-      n ? `Rozvrh to ${at(n.start, n.tomorrow)} vrátí na ${fmtTemp(n.temp)} °C` : `Podle rozvrhu by bylo ${fmtTemp(planned)} °C`,
+      n ? `Rozvrh to ${at(n)} vrátí na ${fmtTemp(n.temp)} °C` : `Podle rozvrhu by bylo ${fmtTemp(planned)} °C`,
       fmtTemp(target), { tone: target, btn: 'Podle rozvrhu' });
   }
   if (!slot) return tile('none', 'clockOutline', 'Žádný rozvrh', 'Pro tuto hlavici není žádný rozvrh', DASH, { muted: true });
@@ -444,7 +471,7 @@ export function nowState({ states = {}, circuit, valve, schedules, program, now 
   const n = slot.next;
   const names = attrOf(states, `sensor.heating_program_${circuit}`, 'program_names') || {};
   return tile('normal', 'clockOutline',
-    `Teď ${fmtTemp(slot.temp)} °C${n ? `, od ${n.tomorrow ? 'zítra ' : ''}${fmtTime(n.start)} ${fmtTemp(n.temp)} °C` : ''}${by}`,
+    `Teď ${fmtTemp(slot.temp)} °C${n ? `, od ${when(n)}${fmtTime(n.start)} ${fmtTemp(n.temp)} °C` : ''}${by}`,
     `Běží program ${names[program] || (program === 'auto' ? 'Výchozí' : program)}${slot.schedule ? ` · ${daysLabel(slot.schedule.days)}` : ''}`,
     fmtTemp(slot.temp), { tone: slot.temp });
 }
@@ -655,7 +682,9 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
   }
 
   setConfig(config) {
-    this._cfg = normalizeConfig(config);
+    this._base = this._cfg = normalizeConfig(config);
+    this._dkey = '[]';
+    if (this._hass) this._discover();
     this._valve = this._cfg.valve || this._cfg.circuits[0].valves[0];
     this._prog = null;
     this._progPicked = false; // until a chip is picked the card shows the running program
@@ -667,10 +696,20 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
 
   set hass(hass) {
     this._hass = hass;
+    this._discover();
     this._start();
     // re-render only when what the card reads from the states changed
     const sig = this._signature();
     if (sig !== this._sig) this._render();
+  }
+
+  /** Base config + the circuits found in the states; rebuilt only when the found circuits or their valves change. */
+  _discover() {
+    const found = discoverCircuits(this._hass.states, this._base);
+    const key = JSON.stringify(found);
+    if (key === this._dkey) return;
+    this._dkey = key;
+    this._cfg = withDiscovered(this._base, this._hass.states);
   }
 
   connectedCallback() { this._start(); }
@@ -789,7 +828,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
       a(`sensor.heating_off_schedule_${id}`, 'window_open_climates'),
       a(`sensor.heating_valves_${id}`, 'phases')?.[v]?.[0], a(`sensor.heating_valves_${id}`, 'forced'), a(`sensor.heating_valves_${id}`, 'closed'),
       s(`sensor.heating_applying_${id}`), a(`sensor.heating_applying_${id}`, 'left'),
-      a(`sensor.heating_schedule_${id}`, 'targets'),
+      a(`sensor.heating_schedule_${id}`, 'targets'), this._dkey,
     ]);
   }
 

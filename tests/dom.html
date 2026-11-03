@@ -636,6 +636,15 @@
     r.programInfoCached = !!pi && c29._pi === pi && Object.keys(pi.byValve).join() === [K, BD, HL].join();
     c29.remove();
 
+    // a circuit that exists only in the states (not in the config) is offered in the copy view
+    const FAR = 'climate.far_valve';
+    S = mkStore(fixture);
+    S.hass.states = { ...cst, [FAR]: { state: 'heat', attributes: { friendly_name: 'Daleko' } }, 'sensor.heating_schedule_c2': { state: 'ok', attributes: { targets: { [FAR]: 20 } } } };
+    const c30 = await mkCard(S.hass, { ...ccfg, valve: K });
+    click(c30, '[data-a="copyOpen"]');
+    r.discoveredCopyTarget = !!c30.shadowRoot.querySelector('.tile[data-a="cp-tgt"][data-k="' + FAR + '"]');
+    c30.remove();
+
 
     r.noErrors = errors.length === 0;
     const ok = Object.values(r).every(Boolean);

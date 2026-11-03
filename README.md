@@ -16,19 +16,21 @@ A Home Assistant card for the weekly heating schedules of climate valves, writte
 
 Not in HACS. Copy [`dist/heating-schedule-card.js`](dist/heating-schedule-card.js) to `config/www/`, then add a dashboard resource:
 
-Settings → Dashboards → ⋮ → Resources → Add resource → URL `/local/heating-schedule-card.js?v=0.1.0`, type **JavaScript module** → reload the browser. Change `?v=` after copying a new version.
+Settings → Dashboards → ⋮ → Resources → Add resource → URL `/local/heating-schedule-card.js?v=0.1.1`, type **JavaScript module** → reload the browser. Change `?v=` after copying a new version.
 
 ## Configuration
 
 ```yaml
 type: custom:heating-schedule-card
 valve: climate.obyvak_valve        # optional: preselected valve; none = the first valve of the first circuit
-circuits:                           # required: circuits whose valves can be picked / copied to
+circuits:                           # required: configured circuits; every other heating circuit in the states is added automatically
   - id: heating_circuit_1           # heating instance = area id; entity ids derive from it
     name: Přízemí                   # optional: default = attribute `title` of binary_sensor.heating_state_<id>, else the id
     valves: [climate.obyvak_valve, climate.kuchyn_valve]
 time_step: 15                       # optional, minutes (divisor of 1440)
 ```
+
+Circuits are discovered: every `sensor.heating_schedule_<id>` with a `targets` attribute adds a circuit (valves = the keys of `targets`, name = `title` of `binary_sensor.heating_state_<id>`), so the valve picker and the copy view reach all heating circuits. `circuits` in the config only adds or names circuits; a configured id wins, and a valve stays in the first circuit that lists it.
 
 ## How it works with the heating feature
 
