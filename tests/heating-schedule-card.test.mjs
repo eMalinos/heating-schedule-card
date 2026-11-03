@@ -5,6 +5,7 @@ import {
   normalizeConfig, circuitName, parseSchedule, toPayload, effective, slotAt, groupByProgram, daysLabel, tempColor, fmtTemp, fmtTime,
   discoverCircuits, loadSchedules, saveSchedule, removeSchedule, nowState, DASH, isFallbackProgram, barSegments, slotsSummary,
   normalizeSlots, splitSlot, removeSlot, moveBoundary, setTemp, daysConflict, planCopy, copyable,
+  weekParity, isoWeek, czechHolidays, holidayDates, slugify, checkProgram, ymd,
 } from '../dist/heating-schedule-card.js';
 
 process.env.TZ = 'Europe/Prague'; // the DST test needs a zone with a spring-forward day
@@ -12,6 +13,7 @@ process.env.TZ = 'Europe/Prague'; // the DST test needs a zone with a spring-for
 const FIXTURE = JSON.parse(readFileSync(new URL('./fixtures/schedules.json', import.meta.url)));
 const V = 'climate.kitchen_valve';
 const at = (y, m, d, h = 0, mi = 0) => new Date(y, m - 1, d, h, mi); // 2026-11-02 is a Monday
+const DAYD = { mon: at(2026, 11, 2), tue: at(2026, 11, 3) }; // two days of an odd week
 
 /** A scheduler item: slots = [[start, stop, temp], ...]. */
 const item = (slots, extra = {}) => ({
@@ -57,7 +59,7 @@ test('parseSchedule: real dev items are editable', () => {
   assert.ok(all.every((s) => s.editable), 'all editable');
   const [auto, vac] = all;
   assert.deepEqual({ ...auto, raw: null }, {
-    id: '848813', switch: 'switch.schedule_bench_kitchen_valve_auto', valve: V, valves: [V], program: 'auto',
+    id: '848813', switch: 'switch.schedule_bench_kitchen_valve_auto', valve: V, valves: [V], program: 'auto', week: null,
     days: ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'], slots: [{ start: 0, end: 1440, temp: 21 }], paused: false, editable: true, raw: null,
   });
   assert.equal(vac.program, 'vacation');
@@ -140,13 +142,13 @@ test('effective: program day, fallback, paused', () => {
   const auto = sched([['00:00:00', '00:00:00', 21]], { schedule_id: 'a', tags: ['program:auto'] });
   const vacMon = sched([['00:00:00', '00:00:00', 16]], { schedule_id: 'v', tags: ['program:vacation'], weekdays: ['mon'] });
   const all = [auto, vacMon];
-  assert.deepEqual(effective(all, V, 'vacation', 'mon'), { schedules: [vacMon], isFallback: false });
-  assert.deepEqual(effective(all, V, 'vacation', 'tue'), { schedules: [auto], isFallback: true });
-  assert.deepEqual(effective(all, V, 'auto', 'mon'), { schedules: [auto], isFallback: false });
-  assert.deepEqual(effective(all, V, 'odd_week', 'mon'), { schedules: [auto], isFallback: true });
+  assert.deepEqual(effective(all, V, 'vacation', DAYD.mon), { schedules: [vacMon], isFallback: false });
+  assert.deepEqual(effective(all, V, 'vacation', DAYD.tue), { schedules: [auto], isFallback: true });
+  assert.deepEqual(effective(all, V, 'auto', DAYD.mon), { schedules: [auto], isFallback: false });
+  assert.deepEqual(effective(all, V, 'odd_week', DAYD.mon), { schedules: [auto], isFallback: true });
   const paused = { ...vacMon, paused: true };
-  assert.deepEqual(effective([auto, paused], V, 'vacation', 'mon'), { schedules: [auto], isFallback: true });
-  assert.deepEqual(effective(all, 'climate.other', 'auto', 'mon'), { schedules: [], isFallback: false });
+  assert.deepEqual(effective([auto, paused], V, 'vacation', DAYD.mon), { schedules: [auto], isFallback: true });
+  assert.deepEqual(effective(all, 'climate.other', 'auto', DAYD.mon), { schedules: [], isFallback: false });
 });
 
 test('slotAt: slot, next, carry-over, fallback, paused', () => {
@@ -257,11 +259,11 @@ test('multi-valve schedule: read-only, counts for each of its valves', () => {
   assert.equal(s.valve, null);
   assert.equal(s.editable, false);
   for (const v of [V, 'climate.b']) {
-    assert.equal(effective([s], v, 'auto', 'mon').schedules.length, 1);
+    assert.equal(effective([s], v, 'auto', DAYD.mon).schedules.length, 1);
     assert.equal(slotAt([s], v, 'auto', at(2026, 11, 2, 7)).temp, 20);
     assert.equal(groupByProgram([s], v).get('auto').length, 1);
   }
-  assert.equal(effective([s], 'climate.c', 'auto', 'mon').schedules.length, 0);
+  assert.equal(effective([s], 'climate.c', 'auto', DAYD.mon).schedules.length, 0);
 });
 
 test('toPayload: keeps name and start / end date, only owned fields change', () => {
@@ -622,4 +624,191 @@ test('nowState: a change exactly a week ahead reads "příští"', () => {
   const mon = sched([['00:00:00', '06:00:00', 19], ['06:00:00', '00:00:00', 21]], { weekdays: ['mon'] });
   const n = nowState({ states: {}, circuit: C, valve: V, schedules: [mon], program: 'auto', now: at(2026, 11, 2, 7, 0) });
   assert.equal(n.text, 'Teď 21 °C, od příští Po 00:00 19 °C');
+});
+
+// ---------- v0.2.0: programs, odd / even weeks, holidays ----------
+
+/** A schedule as in heating's test_schedule.py `sch()`: temps / starts per slot, each slot ends at the next start (the last at 23:00). */
+const hs = (temp, start = '06:00:00', weekdays = ['daily'], tags = [], id = `h${Math.random()}`) => {
+  const temps = Array.isArray(temp) ? temp : [temp], starts = Array.isArray(start) ? start : [start];
+  return parseSchedule({
+    schedule_id: id, entity_id: `switch.schedule_${id}`, weekdays, repeat_type: 'repeat', tags, name: null,
+    timeslots: starts.map((st, i) => ({ start: st, stop: starts[i + 1] ?? '23:00:00', conditions: [], actions: [{ service: 'climate.set_temperature', entity_id: V, service_data: { temperature: temps[i] } }] })),
+  });
+};
+
+test('weekParity: strict 14-day rhythm from 2025-12-29, never ISO week % 2 (heating_week_parity vectors)', () => {
+  for (const [y, m, d, want] of [[2026, 12, 28, 'odd'], [2027, 1, 4, 'even'], [2026, 1, 5, 'even'], [2025, 12, 29, 'odd'], [2025, 12, 22, 'even'], [2026, 11, 2, 'odd'], [2026, 11, 9, 'even']]) {
+    assert.equal(weekParity(new Date(y, m - 1, d)), want, `${y}-${m}-${d}`);
+  }
+  // every day of a week has the week's parity; Sunday 2027-01-03 is still the odd week of 2026-12-28
+  assert.equal(weekParity(new Date(2027, 0, 3)), 'odd');
+  assert.equal(isoWeek(new Date(2026, 10, 2)), 45);
+  assert.equal(isoWeek(new Date(2026, 11, 28)), 53); // ISO 53 odd, then the next week is "even" although ISO 1 is odd
+  assert.equal(isoWeek(new Date(2027, 0, 4)), 1);
+});
+
+test('czechHolidays: 13 dates by date with names, Easter from the algorithm; holidayDates by mode', () => {
+  const cz = czechHolidays(2026), dates = cz.map((h) => h.date);
+  assert.equal(cz.length, 13);
+  assert.deepEqual(dates, [...dates].sort());
+  assert.ok(['2026-04-03', '2026-04-06', '2026-01-01', '2026-12-26'].every((d) => dates.includes(d)));
+  assert.equal(cz.find((h) => h.date === '2026-04-03').name, 'Velký pátek');
+  assert.equal(cz.find((h) => h.date === '2026-04-06').name, 'Velikonoční pondělí');
+  assert.equal(cz.find((h) => h.date === '2026-12-24').name, 'Štědrý den');
+  assert.deepEqual(czechHolidays(2027).filter((h) => /^Velk|^Velikonoční/.test(h.name)).map((h) => h.date), ['2027-03-26', '2027-03-29']);
+  const st = (mode, extra = {}) => ({ 'input_select.heating_holidays_c1': { state: mode }, ...extra });
+  const now = at(2026, 11, 2);
+  assert.equal(holidayDates(st('none'), 'c1', now).size, 0);
+  assert.equal(holidayDates({}, 'c1', now).size, 0);
+  const czSet = holidayDates(st('cz'), 'c1', now);
+  assert.ok(czSet.has('2026-11-17') && czSet.has('2027-01-01') && czSet.has('2025-12-25'));
+  const cal = holidayDates(st('calendar', { 'sensor.heating_programs_c1': { attributes: { holiday_dates: ['2026-11-04', 'junk', 7, '2026-12-24'] } } }), 'c1', now);
+  assert.deepEqual([...cal], ['2026-11-04', '2026-12-24']);
+  assert.equal(holidayDates(st('calendar'), 'c1', now).size, 0);
+});
+
+test('slotAt = heating_slot_temp: the week, holiday and carry-over vectors of heating test_schedule.py', () => {
+  const MON_7 = at(2026, 11, 2, 7), MON_5 = at(2026, 11, 2, 5), TUE_7 = at(2026, 11, 3, 7), MON2_7 = at(2026, 11, 9, 7);
+  const WED_7 = at(2026, 11, 4, 7), THU_5 = at(2026, 11, 5, 5), W53_7 = at(2026, 12, 28, 7), W1_5 = at(2027, 1, 4, 5), W1_7 = at(2027, 1, 4, 7);
+  const HOL = new Set(['2026-11-04']);
+  const AUTO = hs(21);
+  const cases = [
+    [[hs(16, '06:00:00', ['daily'], ['week:odd'])], 'auto', MON_7, 16],
+    [[hs(16, '06:00:00', ['daily'], ['week:even'])], 'auto', MON_7, 16], // nothing today: Sunday's (even) slot carries over
+    [[hs(16, '06:00:00', ['daily'], ['week:even'])], 'auto', TUE_7, null],
+    [[hs(16, '06:00:00', ['daily'], ['week:even'])], 'auto', MON2_7, 16],
+    [[hs(16, '06:00:00', ['daily'], ['week:odd']), hs(22, '06:30:00', ['daily'], ['week:even']), hs(19, '05:30:00')], 'auto', MON2_7, 22],
+    [[hs(16, '06:00:00', ['daily'], ['program:vacation', 'week:even']), AUTO], 'vacation', MON_7, 21], // the program is only in even weeks
+    [[hs(16, '06:00:00', ['daily'], ['program:vacation', 'week:even']), AUTO], 'vacation', MON2_7, 16],
+    [[hs(18, '06:00:00', ['daily'], ['week:odd']), hs(23, '06:00:00', ['daily'], ['week:even'])], 'vacation', MON_7, 18], // the fallback respects the parity
+    [[hs(17, '20:00:00', ['sun'], ['week:even']), hs(19, '20:00:00', ['sun'], ['week:odd']), hs(21, '06:00:00', ['mon'])], 'auto', MON_5, 17], // Sunday's own week
+    [[hs(16, '06:00:00', ['daily'], ['week:odd']), hs(22, '06:00:00', ['daily'], ['week:even'])], 'auto', W53_7, 16], // across the 53-week year
+    [[hs(16, '06:00:00', ['daily'], ['week:odd']), hs(22, '06:00:00', ['daily'], ['week:even'])], 'auto', W1_7, 22],
+    [[hs(17, '20:00:00', ['sun'], ['week:odd']), hs(19, '20:00:00', ['sun'], ['week:even']), hs(21, '06:00:00', ['mon'])], 'auto', W1_5, 17],
+    [[hs(21, '06:00:00', ['wed']), hs(15, '06:00:00', ['sun'])], 'auto', WED_7, 15, HOL], // a holiday runs by Sunday
+    [[hs(21, '06:00:00', ['wed']), hs(15, '06:00:00', ['sun'])], 'auto', WED_7, 21],
+    [[hs(21, '06:00:00', ['wed', 'thu']), hs(15, '20:00:00', ['sun'])], 'auto', THU_5, 15, HOL], // the day after a holiday
+    [[hs(21, '06:00:00', ['wed', 'thu']), hs(15, '20:00:00', ['sun'])], 'auto', THU_5, 21],
+    [[hs([18, 21, 19], ['06:00:00', '08:00:00', '20:00:00'])], 'auto', MON_5, 19],
+    [[hs(21, '06:00:00', ['mon']), hs(18, '08:00:00', ['sun']), hs(17, '20:00:00', ['sun'])], 'auto', MON_5, 17],
+    [[], 'auto', MON_7, null],
+  ];
+  for (const [list, program, when, want, hol] of cases) {
+    assert.equal(slotAt(list, V, program, when, { holidays: hol ?? new Set() })?.temp ?? null, want, `${program} ${when.toISOString()} ${want}`);
+  }
+});
+
+test('effective: week parity and holidays', () => {
+  const odd = hs(20, '06:00:00', ['mon'], ['week:odd'], 'o'), even = hs(18, '06:00:00', ['mon'], ['week:even'], 'e'), every = hs(21, '06:00:00', ['mon', 'sun'], [], 'a');
+  const ids = (d, ctx) => effective([odd, even, every], V, 'auto', d, ctx).schedules.map((s) => s.id);
+  assert.deepEqual(ids(at(2026, 11, 2)), ['o', 'a']);
+  assert.deepEqual(ids(at(2026, 11, 9)), ['e', 'a']);
+  assert.deepEqual(ids(at(2026, 11, 4), { holidays: new Set(['2026-11-04']) }), ['a']); // Wednesday holiday = Sunday: only `every` has sun
+  assert.deepEqual(ids(at(2026, 11, 4)), []);
+});
+
+test('nowState: the next change may be in the other week; a holiday shows "podle neděle"', () => {
+  const odd = hs(20, '06:00:00', ['mon'], ['week:odd'], 'o'), even = hs(18, '06:00:00', ['wed'], ['week:even'], 'e');
+  const r = nowState({ circuit: 'c1', valve: V, schedules: [odd, even], program: 'auto', now: at(2026, 11, 2, 7) });
+  assert.match(r.text, /^Teď 20 °C, od St 11\. 11\. 06:00 18 °C$/); // nine days ahead, in the even week
+  const sun = hs(15, '06:00:00', ['sun']), wed = hs(21, '06:00:00', ['wed']);
+  const h = nowState({ circuit: 'c1', valve: V, schedules: [sun, wed], program: 'auto', now: at(2026, 11, 4, 7), ctx: { holidays: new Set(['2026-11-04']) } });
+  assert.equal(h.sub, 'Svátek · podle neděle');
+  assert.equal(h.temp, '15');
+  assert.notEqual(nowState({ circuit: 'c1', valve: V, schedules: [sun, wed], program: 'auto', now: at(2026, 11, 4, 7) }).sub, 'Svátek · podle neděle');
+});
+
+test('parseSchedule / toPayload: the week:* tag is read, written, removed and never duplicated', () => {
+  assert.equal(sched(THREE, { tags: ['week:odd'] }).week, 'odd');
+  assert.equal(sched(THREE, { tags: ['week:even', 'x'] }).week, 'even');
+  assert.equal(sched(THREE, { tags: ['week:even', 'week:odd'] }).week, 'odd'); // heating checks odd first
+  assert.equal(sched(THREE).week, null);
+  const ex = sched(THREE, { tags: ['mine', 'program:vacation', 'week:odd', 'paused'] });
+  assert.deepEqual(toPayload({ ...ex, week: 'even' }, ex).tags, ['mine', 'program:vacation', 'week:even', 'paused']);
+  assert.deepEqual(toPayload({ ...ex, week: null }, ex).tags, ['mine', 'program:vacation', 'paused']);
+  assert.deepEqual(toPayload({ valve: V, program: 'auto', days: ['mon'], slots: ex.slots, week: 'odd' }).tags, ['program:auto', 'week:odd']);
+  // a model without `week` keeps the stored tag
+  const { week, ...noWeek } = ex;
+  assert.ok(toPayload(noWeek, ex).tags.includes('week:odd'));
+  assert.ok(!toPayload({ valve: V, program: 'auto', days: ['mon'], slots: ex.slots }).tags.includes('week:odd'));
+});
+
+test('daysConflict: odd and even never conflict, no tag conflicts with both', () => {
+  const list = [sched(THREE, { schedule_id: 'o', weekdays: ['mon', 'tue'], tags: ['week:odd'] }), sched(THREE, { schedule_id: 'e', weekdays: ['wed'], tags: ['week:even'] })];
+  assert.deepEqual(daysConflict(list, V, 'auto', ['mon', 'tue', 'wed'], null, 'even'), ['wed']);
+  assert.deepEqual(daysConflict(list, V, 'auto', ['mon', 'tue', 'wed'], null, 'odd'), ['mon', 'tue']);
+  assert.deepEqual(daysConflict(list, V, 'auto', ['mon', 'tue', 'wed'], null, null), ['mon', 'tue', 'wed']);
+  assert.deepEqual(daysConflict(list, V, 'auto', ['mon', 'tue', 'wed'], 'o', 'odd'), []);
+  const every = [sched(THREE, { schedule_id: 'a', weekdays: ['mon'] })];
+  assert.deepEqual(daysConflict(every, V, 'auto', ['mon'], null, 'odd'), ['mon']);
+});
+
+test('planCopy keeps the week; odd and even Po–Pá copy side by side; a one-parity copy splits an every-week target', () => {
+  const W = ['mon', 'tue', 'wed', 'thu', 'fri'], T = 'climate.b';
+  const tags = (week) => ['program:auto', ...(week ? [`week:${week}`] : [])];
+  const src = (id, week) => sched(THREE, { schedule_id: id, weekdays: W, tags: tags(week) });
+  const tgt = (id, days, week) => parseSchedule({ ...item(THREE, { schedule_id: id, weekdays: days, tags: tags(week) }), timeslots: item(THREE).timeslots.map((t) => ({ ...t, actions: [{ ...t.actions[0], entity_id: T }] })) });
+  const base = { source: V, mode: 'one', scheduleIds: ['o', 'e'], targets: [T], conflict: 'replace' };
+  // both parities of the same weekdays: nothing is dropped, both keep their week
+  let r = planCopy({ ...base, schedules: [src('o', 'odd'), src('e', 'even')] });
+  assert.deepEqual(r.add.map((m) => [m.valve, m.week, m.days.join()]), [[T, 'odd', W.join()], [T, 'even', W.join()]]);
+  assert.equal(r.notes[T], 'dostane 2 rozvrhy, nic se nepřepíše.');
+  // whole valve keeps week too
+  r = planCopy({ ...base, mode: 'valve', programs: ['auto'], schedules: [src('o', 'odd'), src('e', 'even')] });
+  assert.deepEqual(r.add.map((m) => m.week), ['odd', 'even']);
+  // an every-week target Po–Pá hit by the odd copy: the target keeps even weeks as a schedule of its own
+  r = planCopy({ ...base, scheduleIds: ['o'], schedules: [src('o', 'odd'), tgt('t', W, null)] });
+  assert.deepEqual(r.add.map((m) => [m.week, m.days.join()]), [['odd', W.join()], ['even', W.join()]]);
+  assert.deepEqual(r.remove, ['t']);
+  assert.deepEqual(r.edit, []);
+  // the other parity's target schedule is not touched; the same parity is trimmed
+  r = planCopy({ ...base, scheduleIds: ['o'], schedules: [src('o', 'odd'), tgt('te', W, 'even'), tgt('to', ['mon', 'sat'], 'odd')] });
+  assert.deepEqual(r.remove, []);
+  assert.deepEqual(r.edit.map((m) => [m.id, m.week, m.days.join()]), [['to', 'odd', 'sat']]);
+  // an every-week copy covers both parity targets; fill leaves what is taken
+  r = planCopy({ ...base, scheduleIds: ['a'], schedules: [src('a', null), tgt('te', ['mon'], 'even')] });
+  assert.deepEqual(r.remove, ['te']);
+  assert.deepEqual(r.add.map((m) => [m.week, m.days.join()]), [[null, W.join()]]);
+  r = planCopy({ ...base, scheduleIds: ['a'], conflict: 'fill', schedules: [src('a', null), tgt('te', ['mon'], 'even')] });
+  assert.deepEqual(r.add.map((m) => m.days.join()), ['tue,wed,thu,fri']);
+  // a copy of a one-parity schedule next to a read-only target of the other parity is fine
+  r = planCopy({ ...base, scheduleIds: ['o'], schedules: [src('o', 'odd'), { ...tgt('ro', W, 'even'), editable: false }] });
+  assert.equal(r.add.length, 1);
+});
+
+test('slugify / checkProgram: id from the name, reserved and used names, per-field messages', () => {
+  assert.equal(slugify('Chata u lesa!'), 'chata_u_lesa');
+  assert.equal(slugify('  Dovolená Ždár  '), 'dovolena_zdar');
+  assert.equal(slugify('!!!'), '');
+  const list = [{ id: 'auto', name: 'Výchozí' }, { id: 'vacation', name: 'Dovolená' }];
+  assert.deepEqual(checkProgram('Chata', list), { id: 'chata', error: '' });
+  assert.equal(checkProgram('', list).error, 'Zadej název programu');
+  assert.equal(checkProgram('   ', list).error, 'Zadej název programu');
+  assert.equal(checkProgram('???', list).error, 'Název musí obsahovat písmeno nebo číslici');
+  assert.equal(checkProgram('Výchozí', list).error, 'Výchozí je vyhrazený název');
+  assert.equal(checkProgram('vychozi', list).error, 'Výchozí je vyhrazený název');
+  assert.equal(checkProgram('AUTO', list).error, 'Výchozí je vyhrazený název');
+  assert.equal(checkProgram('dovolená', list).error, 'Program s tímto názvem už existuje'); // a name already used
+  assert.equal(checkProgram('Chata!', [...list, { id: 'chata', name: 'Hytta' }]).error, 'Program s tímto názvem už existuje'); // the id already used
+  assert.equal(checkProgram('Dovolená!', list, 'vacation').error, '', 'renaming a program keeps its own id');
+  assert.equal(checkProgram('Dovolená', list, 'vacation').error, '');
+  assert.equal(ymd(at(2026, 1, 5)), '2026-01-05');
+});
+
+test('planCopy never plans an add or an edit without days (Po lichý + Po sudý over an every-week Po–Pá)', () => {
+  const W = ['mon', 'tue', 'wed', 'thu', 'fri'], T = 'climate.b';
+  const mk = (id, days, week, valve) => parseSchedule({ ...item(THREE, { schedule_id: id, weekdays: days, tags: ['program:auto', ...(week ? [`week:${week}`] : [])] }),
+    timeslots: item(THREE).timeslots.map((t) => ({ ...t, actions: [{ ...t.actions[0], entity_id: valve }] })) });
+  const r = planCopy({ source: V, mode: 'one', scheduleIds: ['o', 'e'], targets: [T], conflict: 'replace',
+    schedules: [mk('o', ['mon'], 'odd', V), mk('e', ['mon'], 'even', V), mk('t', W, null, T)] });
+  assert.deepEqual(r.add.map((m) => [m.week, m.days.join()]), [['odd', 'mon'], ['even', 'mon']]);
+  assert.deepEqual(r.edit.map((m) => [m.id, m.week, m.days.join()]), [['t', null, 'tue,wed,thu,fri']]);
+  assert.deepEqual(r.remove, []);
+  for (const m of [...r.add, ...r.edit]) assert.ok(m.days.length, 'days');
+  // the target's only weekday taken by both parities: it is removed, not edited to nothing
+  const r2 = planCopy({ source: V, mode: 'one', scheduleIds: ['o', 'e'], targets: [T], conflict: 'replace',
+    schedules: [mk('o', ['mon'], 'odd', V), mk('e', ['mon'], 'even', V), mk('t', ['mon'], null, T)] });
+  assert.deepEqual(r2.add.map((m) => [m.week, m.days.join()]), [['odd', 'mon'], ['even', 'mon']]);
+  assert.deepEqual([r2.edit, r2.remove], [[], ['t']]);
 });

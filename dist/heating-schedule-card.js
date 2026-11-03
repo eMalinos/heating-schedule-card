@@ -1,13 +1,15 @@
 // heating-schedule-card: weekly heating schedules of climate valves, stored by scheduler-component.
 // One plain ES module: no build step, no dependencies. Pure functions are exported for `node --test`.
-const VERSION = '0.1.1';
+const VERSION = '0.2.0';
 
 export const DAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 const DAY_LABELS = { mon: 'Po', tue: 'Út', wed: 'St', thu: 'Čt', fri: 'Pá', sat: 'So', sun: 'Ne' };
 const DAY_ALIASES = { daily: DAYS, workday: DAYS.slice(0, 5), weekend: DAYS.slice(5) };
 const DAY_END = 1440;
+const RUNNING_MSG = 'Program právě běží — nejdřív přepněte okruh na jiný program';
 export const dow = (d) => DAYS[(d.getDay() + 6) % 7];
 const pad = (n) => String(n).padStart(2, '0');
+export const ymd = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
 // ---------- formatting ----------
@@ -43,6 +45,58 @@ export function tempColor(t, dark = false) {
   const a = rgb(stops[i]), b = rgb(stops[i + 1]), f = x - i;
   return '#' + a.map((v, k) => Math.round(v + (b[k] - v) * f).toString(16).toUpperCase().padStart(2, '0')).join('');
 }
+
+// ---------- weeks and holidays (the same rules as heating's `heating_week_parity`, `heating_cz_holidays`) ----------
+
+/**
+ * 'odd' | 'even' week of `date`: a strict every-7-days alternation counted from Monday 2025-12-29 (= odd), exactly as
+ * heating's `heating_week_parity`. Never ISO week % 2: 2026 has ISO week 53, so after it the names differ from the ISO ones.
+ */
+export function weekParity(date) {
+  const n = Math.floor((Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()) - Date.UTC(2025, 11, 29)) / 6048e5);
+  return n % 2 === 0 ? 'odd' : 'even';
+}
+
+/** ISO week number of `date` (display only, next to the parity). */
+export function isoWeek(date) {
+  const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+  d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7) + 3); // the Thursday of this week
+  const jan4 = new Date(Date.UTC(d.getUTCFullYear(), 0, 4));
+  return 1 + Math.round(((d - jan4) / 864e5 - 3 + ((jan4.getUTCDay() + 6) % 7)) / 7);
+}
+
+const CZ_FIXED = [['01-01', 'Den obnovy samostatného českého státu'], ['05-01', 'Svátek práce'], ['05-08', 'Den vítězství'],
+  ['07-05', 'Den slovanských věrozvěstů Cyrila a Metoděje'], ['07-06', 'Den upálení mistra Jana Husa'], ['09-28', 'Den české státnosti'],
+  ['10-28', 'Den vzniku samostatného československého státu'], ['11-17', 'Den boje za svobodu a demokracii'], ['12-24', 'Štědrý den'],
+  ['12-25', '1. svátek vánoční'], ['12-26', '2. svátek vánoční']];
+
+/** Czech public holidays of `year` -> [{date: 'YYYY-MM-DD', name}] by date: the list of heating's `heating_cz_holidays`. */
+export function czechHolidays(year) {
+  const a = year % 19, b = Math.floor(year / 100), c = year % 100, d = Math.floor(b / 4), e = b % 4, f = Math.floor((b + 8) / 25);
+  const g = Math.floor((b - f + 1) / 3), h = (19 * a + b - d - g + 15) % 30, i = Math.floor(c / 4), k = c % 4;
+  const l = (32 + 2 * e + 2 * i - h - k) % 7, m = Math.floor((a + 11 * h + 22 * l) / 451);
+  const month = Math.floor((h + l - 7 * m + 114) / 31), day = ((h + l - 7 * m + 114) % 31) + 1; // Easter Sunday
+  const easter = (off) => ymd(new Date(year, month - 1, day + off));
+  return [{ date: easter(-2), name: 'Velký pátek' }, { date: easter(1), name: 'Velikonoční pondělí' },
+    ...CZ_FIXED.map(([md, name]) => ({ date: `${year}-${md}`, name }))].sort((x, y) => (x.date < y.date ? -1 : 1));
+}
+
+/** The circuit's public holidays as a Set of 'YYYY-MM-DD' (heating's `heating_holidays`): `cz` built in (last, this and next year), `calendar` = the imported dates. */
+export function holidayDates(states, id, now = new Date()) {
+  const mode = states?.[`input_select.heating_holidays_${id}`]?.state;
+  if (mode === 'cz') return new Set([-1, 0, 1].flatMap((o) => czechHolidays(now.getFullYear() + o)).map((h) => h.date));
+  if (mode !== 'calendar') return new Set();
+  const dates = states?.[`sensor.heating_programs_${id}`]?.attributes?.holiday_dates;
+  return new Set((Array.isArray(dates) ? dates : []).filter((d) => typeof d === 'string' && /^\d{4}-\d\d-\d\d$/.test(d)));
+}
+
+/** Another schedule's week tag overlaps this one: no tag (every week) overlaps both, `odd` and `even` never. */
+const weeksOverlap = (a, b) => !a || !b || a === b;
+const otherWeek = (w) => (w === 'odd' ? 'even' : 'odd');
+const WEEK_LABEL = { odd: 'lichý', even: 'sudý' };
+const weekSuffix = (w) => (w ? ` · ${WEEK_LABEL[w]}` : '');
+/** A schedule named for a message: its weekdays and, when tagged, its week (`Po–Pá · lichý`). */
+const schedName = (s) => daysLabel(s.days) + weekSuffix(s.week);
 
 // ---------- config ----------
 
@@ -99,7 +153,7 @@ const hms = (m) => `${pad(Math.floor(m / 60) % 24)}:${pad(m % 60)}:00`;
 
 /**
  * One element of the WS `{type: 'scheduler'}` list (scheduler-component's async_get_entity_state) -> the card's model:
- * {id, switch, valve, valves, program, days, slots: [{start, end, temp}], paused, editable, raw}.
+ * {id, switch, valve, valves, program, week: null | 'odd' | 'even' (tag `week:*`), days, slots: [{start, end, temp}], paused, editable, raw}.
  * Like heating, only slot STARTS count: slots are sorted, each ends where the next starts, the last at 24:00 (a first
  * slot after 00:00 is fine: the previous day's last slot holds until then). `valve` = the only valve, else null.
  * Not editable (shown read-only, never written): repeat_type != repeat, workday / weekend weekdays, conditions,
@@ -134,9 +188,10 @@ export function parseSchedule(item) {
   });
   if (!slots.length || valves.length !== 1) editable = false;
   const program = tags.find((t) => t.startsWith('program:'))?.slice(8) || 'auto';
+  const week = tags.includes('week:odd') ? 'odd' : tags.includes('week:even') ? 'even' : null; // odd wins, as in heating
   return {
     id: item.schedule_id, switch: item.entity_id, valve: valves.length === 1 ? valves[0] : null, valves,
-    program, days, slots, paused: tags.includes('paused'), editable, raw: item,
+    program, week, days, slots, paused: tags.includes('paused'), editable, raw: item,
   };
 }
 
@@ -147,7 +202,8 @@ export function parseSchedule(item) {
  */
 export function toPayload(model, existing = null) {
   const raw = existing?.raw ?? {};
-  const kept = (raw.tags ?? []).filter((t) => t !== 'paused' && !t.startsWith('program:'));
+  const kept = (raw.tags ?? []).filter((t) => t !== 'paused' && !t.startsWith('program:') && t !== 'week:odd' && t !== 'week:even');
+  const week = model.week === undefined ? existing?.week ?? null : model.week; // a model without `week` keeps the stored one
   const days = DAYS.filter((d) => model.days.includes(d));
   const body = {
     weekdays: days.length === 7 ? ['daily'] : days,
@@ -157,7 +213,7 @@ export function toPayload(model, existing = null) {
       actions: [{ service: 'climate.set_temperature', entity_id: model.valve, service_data: { temperature: s.temp } }],
     })),
     repeat_type: 'repeat',
-    tags: [...kept, `program:${model.program}`, ...(model.paused ? ['paused'] : [])],
+    tags: [...kept, `program:${model.program}`, ...(week ? [`week:${week}`] : []), ...(model.paused ? ['paused'] : [])],
     name: raw.name ?? null,
   };
   for (const k of ['start_date', 'end_date']) if (raw[k] != null) body[k] = raw[k];
@@ -169,12 +225,14 @@ export function toPayload(model, existing = null) {
 // ---------- what a valve does ----------
 
 /**
- * Schedules a valve uses on `day`: the running program's non-paused schedules that include the day, else `auto`'s
- * (fallback per day, `isFallback` true then). A schedule with several valves counts for each of them (heating matches
- * by `entities` membership). Same rules as heating's `heating_slot_temp`.
+ * Schedules a valve uses on the calendar day `date`: the running program's non-paused schedules that include the weekday
+ * and the week parity of that date, else `auto`'s (fallback per day, `isFallback` true then). `ctx.holidays` (Set of
+ * 'YYYY-MM-DD'): a holiday counts as `sun`. A schedule with several valves counts for each of them (heating matches by
+ * `entities` membership). Same rules as heating's `heating_slot_temp`.
  */
-export function effective(schedules, valve, program, day) {
-  const on = schedules.filter((s) => s.valves.includes(valve) && !s.paused && s.days.includes(day));
+export function effective(schedules, valve, program, date, ctx = {}) {
+  const day = ctx.holidays?.has(ymd(date)) ? 'sun' : dow(date), week = weekParity(date);
+  const on = schedules.filter((s) => s.valves.includes(valve) && !s.paused && s.days.includes(day) && (!s.week || s.week === week));
   const own = on.filter((s) => s.program === program);
   if (own.length || program === 'auto') return { schedules: own, isFallback: false };
   return { schedules: on.filter((s) => s.program === 'auto'), isFallback: true };
@@ -187,11 +245,13 @@ const slotsOf = (list) => list.flatMap((s) => s.slots.map((x) => ({ ...x, schedu
  * Latest start <= now today, else the last slot of yesterday's schedules (the evening slot holds past midnight),
  * else today's own last slot (as heating does). `start` / `end` are minutes of the day the slot belongs to.
  */
-export function slotAt(schedules, valve, program, date) {
-  const day = (offset) => {
+export function slotAt(schedules, valve, program, date, ctx = {}) {
+  const memo = new Map(); // one effective() per calendar day within a call (today and yesterday are read again below)
+  const day = (offset) => memo.get(offset) ?? memo.set(offset, dayOf(offset)).get(offset);
+  const dayOf = (offset) => {
     const d = new Date(date); // calendar days, not 24 h: a DST change day is 23 / 25 h long
     d.setDate(d.getDate() + offset);
-    const e = effective(schedules, valve, program, dow(d));
+    const e = effective(schedules, valve, program, d, ctx);
     return slotsOf(e.schedules).map((x) => ({ ...x, schedule: x.schedule, isFallback: e.isFallback }));
   };
   const now = date.getHours() * 60 + date.getMinutes();
@@ -201,7 +261,7 @@ export function slotAt(schedules, valve, program, date) {
   if (!pick) return null;
   // boundary = the next slot start (heating re-applies the target there); next = the next slot with another temperature
   let boundary = null, nxt = null;
-  for (let k = 0; k <= 7 && !nxt; k++) {
+  for (let k = 0; k <= 14 && !nxt; k++) { // two weeks: odd / even weeks may differ
     for (const x of k ? day(k) : today.filter((y) => y.start > now)) {
       const m = { start: x.start, temp: x.temp, days: k };
       boundary = boundary || m;
@@ -287,13 +347,13 @@ export function setTemp(slots, i, t) {
   return slots.map((s, k) => (k === i ? { ...s, temp } : s));
 }
 
-/** Of `days`, those another schedule of the same valve and program already uses (`exceptId` = the one being edited). */
-export function daysConflict(schedules, valve, program, days, exceptId = null) {
-  const used = new Set(schedules.filter((s) => s.id !== exceptId && s.program === program && s.valves.includes(valve)).flatMap((s) => s.days));
+/** Of `days`, those another schedule of the same valve and program in an overlapping week already uses (`exceptId` = the one being edited; `week` = the edited one's tag). */
+export function daysConflict(schedules, valve, program, days, exceptId = null, week = null) {
+  const used = new Set(schedules.filter((s) => s.id !== exceptId && s.program === program && s.valves.includes(valve) && weeksOverlap(s.week, week)).flatMap((s) => s.days));
   return DAYS.filter((d) => days.includes(d) && used.has(d));
 }
 
-const plural = (n, one, few, many) => `${n} ${n === 1 ? one : n < 5 ? few : many}`;
+const plural = (n, one, few, many) => `${n} ${n === 1 ? one : n > 1 && n < 5 ? few : many}`;
 
 // ---------- copy: pure logic ----------
 
@@ -308,7 +368,8 @@ export const copyable = (schedules, source) => schedules.filter((s) => s.editabl
  * program are removed first; selected = the copied weekdays are taken out of the target's schedules of that program (one left
  * without days is removed); 'fill': a program the target already has is kept / only weekdays it has free are copied.
  * A target's read-only schedule is never removed or edited, its weekdays stay taken and it gets its own note (only editable
- * schedules count as "the target already has"). With a fixed target program, weekdays two selected schedules both want go to
+ * schedules count as "the target already has"). Weekdays are compared per week: odd and even never collide, a schedule without a
+ * week tag collides with both; a copy keeps the source's `week`. With a fixed target program, weekdays two selected schedules both want go to
  * the first one; the note names the rest. A target whose circuit lacks a
  * target program is skipped with a note. `programsByValve` = {valve: [program ids of its circuit]} (absent = no check).
  */
@@ -320,7 +381,10 @@ export function planCopy({ schedules, source, mode, programs = [], scheduleIds =
   const jobs = mode === 'valve' ? pool.filter((s) => progs.has(s.program)) : [...ids].map((id) => pool.find((s) => s.id === id)).filter(Boolean);
   const progOf = (s) => (mode === 'one' && targetProgram !== 'same' ? targetProgram : s.program);
   const out = { add: [], edit: [], remove: [], notes: {} };
-  const copyOf = (v, p, days, s) => ({ valve: v, program: p, days: DAYS.filter((d) => days.includes(d)), slots: s.slots.map((x) => ({ ...x })), paused: false });
+  const copyOf = (v, p, days, s) => ({ valve: v, program: p, days: DAYS.filter((d) => days.includes(d)), week: s.week, slots: s.slots.map((x) => ({ ...x })), paused: false });
+  // occupied (weekday, week) cells: a schedule without a week tag occupies both parities
+  const cells = (list) => list.flatMap((s) => s.days.map((d) => ({ d, w: s.week })));
+  const at = (list, d, w) => list.find((c) => c.d === d && weeksOverlap(c.w, w));
   for (const v of [...new Set(targets)].filter((x) => x !== source)) {
     if (!jobs.length) { out.notes[v] = 'není co kopírovat.'; continue; }
     const wanted = [...new Set(jobs.map(progOf))];
@@ -330,8 +394,8 @@ export function planCopy({ schedules, source, mode, programs = [], scheduleIds =
     const state = (p) => {
       if (!st.has(p)) {
         const ex = schedules.filter((s) => s.valves.includes(v) && s.program === p);
-        st.set(p, { ex, had: new Set(ex.filter((s) => s.editable).flatMap((s) => s.days)), ro: new Set(ex.filter((s) => !s.editable).flatMap((s) => s.days)),
-          cur: new Map(ex.filter((s) => s.editable).map((s) => [s.id, { s, days: [...s.days] }])), claimed: new Map() }); // claimed: weekday -> source program that took it
+        st.set(p, { ex, had: cells(ex.filter((s) => s.editable)), ro: cells(ex.filter((s) => !s.editable)),
+          cur: new Map(ex.filter((s) => s.editable).map((s) => [s.id, { s, days: [...s.days], week: s.week }])), claimed: [] }); // claimed: {d, w, by} = the source program that took the weekday
       }
       return st.get(p);
     };
@@ -352,29 +416,40 @@ export function planCopy({ schedules, source, mode, programs = [], scheduleIds =
     } else {
       for (const s of jobs) {
         const p = progOf(s), S = state(p);
-        if (s.days.some((d) => S.had.has(d))) hit.add(p);
-        if (s.days.some((d) => S.ro.has(d))) ro.add(p);
-        const taken = s.days.filter((d) => !S.ro.has(d) && S.claimed.has(d));
-        for (const by of new Set(taken.map((d) => S.claimed.get(d)))) {
-          dropped.push(`${daysLabel(taken.filter((d) => S.claimed.get(d) === by))} z programu ${pn(s.program)} se nekopírují, ${pn(by)} je už má`);
+        if (s.days.some((d) => at(S.had, d, s.week))) hit.add(p);
+        if (s.days.some((d) => at(S.ro, d, s.week))) ro.add(p);
+        const taken = s.days.filter((d) => !at(S.ro, d, s.week) && at(S.claimed, d, s.week));
+        const by1 = (d) => at(S.claimed, d, s.week).by;
+        for (const by of new Set(taken.map(by1))) {
+          dropped.push(`${daysLabel(taken.filter((d) => by1(d) === by))}${weekSuffix(s.week)} z programu ${pn(s.program)} se nekopírují, ${pn(by)} je už má`);
         }
-        let days = s.days.filter((d) => !S.ro.has(d) && !S.claimed.has(d));
-        if (conflict === 'fill') days = days.filter((d) => !S.had.has(d));
-        else for (const e of S.cur.values()) e.days = e.days.filter((d) => !days.includes(d));
+        let days = s.days.filter((d) => !at(S.ro, d, s.week) && !at(S.claimed, d, s.week));
+        if (conflict === 'fill') days = days.filter((d) => !at(S.had, d, s.week));
+        else {
+          // the copied weekdays leave the target's schedules of an overlapping week; an every-week schedule hit by a
+          // one-parity copy keeps the other parity as a schedule of its own
+          for (const e of [...S.cur.values()]) {
+            const gone = weeksOverlap(e.week, s.week) ? e.days.filter((d) => days.includes(d)) : [];
+            if (!gone.length) continue;
+            e.days = e.days.filter((d) => !gone.includes(d));
+            if (s.week && !e.week) S.cur.set(`split${S.cur.size}`, { s: e.s, days: gone, week: otherWeek(s.week), fresh: true });
+          }
+        }
         if (!days.length) continue;
-        days.forEach((d) => S.claimed.set(d, s.program));
+        days.forEach((d) => S.claimed.push({ d, w: s.week, by: s.program }));
         out.add.push(copyOf(v, p, days, s));
       }
     }
+    const n = out.add.length - added0; // copies of the source (not the kept-parity remainders below)
     for (const S of st.values()) {
       for (const [id, e] of S.cur) {
-        if (e.days.length === e.s.days.length) continue;
-        if (e.days.length) out.edit.push({ id, valve: e.s.valve, program: e.s.program, days: e.days, slots: e.s.slots, paused: e.s.paused });
+        if (e.fresh) { if (e.days.length) out.add.push({ valve: e.s.valve, program: e.s.program, days: DAYS.filter((d) => e.days.includes(d)), week: e.week, slots: e.s.slots.map((x) => ({ ...x })), paused: e.s.paused }) }
+        else if (e.days.length === e.s.days.length) continue;
+        else if (e.days.length) out.edit.push({ id, valve: e.s.valve, program: e.s.program, days: e.days, week: e.s.week, slots: e.s.slots, paused: e.s.paused });
         else out.remove.push(id);
       }
     }
     // the preview text, as in the canvas (copyNotes)
-    const n = out.add.length - added0;
     const parts = [];
     if (mode === 'valve') {
       if (replaced.length) parts.push(`nahradí ${replaced.map(([p, k]) => `${pn(p)} (${plural(k, 'rozvrh', 'rozvrhy', 'rozvrhů')})`).join(', ')}`);
@@ -427,14 +502,14 @@ const PHASES = {
  * -> {kind, icon, text, sub, temp, unit, tone: 'cold' | 'warm' | 'accent' | °C number | null, muted, btn}.
  * `program` = the running program, `nValves` = valves of the circuit (for "N z M hotovo").
  */
-export function nowState({ states = {}, circuit, valve, schedules, program, now = new Date(), nValves = 0 }) {
-  const slot = slotAt(schedules, valve, program, now);
+export function nowState({ states = {}, circuit, valve, schedules, program, now = new Date(), nValves = 0, ctx = {} }) {
+  const slot = slotAt(schedules, valve, program, now, ctx);
   const sched = slot?.temp ?? attrOf(states, `sensor.heating_schedule_${circuit}`, 'targets')?.[valve] ?? null;
   const schedTxt = sched == null ? null : `${fmtTemp(sched)} °C`;
   const when = (n) => {
     if (n.days < 2) return n.days ? 'zítra ' : '';
-    const d = DAY_LABELS[dow(new Date(now.getFullYear(), now.getMonth(), now.getDate() + n.days))];
-    return n.days === 7 ? `příští ${d} ` : `${d} `;
+    const t = new Date(now.getFullYear(), now.getMonth(), now.getDate() + n.days), d = DAY_LABELS[dow(t)];
+    return n.days === 7 ? `příští ${d} ` : n.days > 7 ? `${d} ${t.getDate()}. ${t.getMonth() + 1}. ` : `${d} `;
   };
   const at = (n) => `${when(n)}v ${fmtTime(n.start)}`;
   const tile = (kind, icon, text, sub, temp, extra = {}) => ({ kind, icon, text, sub, temp, unit: temp === DASH ? '' : '°C', tone: null, muted: false, btn: '', ...extra });
@@ -478,14 +553,34 @@ export function nowState({ states = {}, circuit, valve, schedules, program, now 
   const names = attrOf(states, `sensor.heating_program_${circuit}`, 'program_names') || {};
   return tile('normal', 'clockOutline',
     `Teď ${fmtTemp(slot.temp)} °C${n ? `, od ${when(n)}${fmtTime(n.start)} ${fmtTemp(n.temp)} °C` : ''}${by}`,
-    `Běží program ${names[program] || (program === 'auto' ? 'Výchozí' : program)}${slot.schedule ? ` · ${daysLabel(slot.schedule.days)}` : ''}`,
+    ctx.holidays?.has(ymd(now)) ? 'Svátek · podle neděle'
+      : `Běží program ${names[program] || (program === 'auto' ? 'Výchozí' : program)}${slot.schedule ? ` · ${daysLabel(slot.schedule.days)}` : ''}`,
     fmtTemp(slot.temp), { tone: slot.temp });
 }
 
 const slotKey = (slots) => JSON.stringify(slots.map((x) => [x.start, x.temp]));
-const ownKey = (m) => `${m.valve}|${m.program}|${m.days.join()}|${slotKey(m.slots)}`;
-/** The parts the editor writes (program, weekdays, slots) are equal. */
-const sameContent = (a, b) => a.program === b.program && a.days.join() === b.days.join() && slotKey(a.slots) === slotKey(b.slots);
+const ownKey = (m) => `${m.valve}|${m.program}|${m.week ?? ''}|${m.days.join()}|${slotKey(m.slots)}`;
+/** The parts the editor writes (program, week, weekdays, slots) are equal. */
+const sameContent = (a, b) => a.program === b.program && (a.week ?? null) === (b.week ?? null) && a.days.join() === b.days.join() && slotKey(a.slots) === slotKey(b.slots);
+
+// ---------- programs: pure logic ----------
+
+/** Program id from a name: ASCII lower-case letters and digits, `_` between them (`Chata u lesa` -> `chata_u_lesa`). */
+export const slugify = (name) => String(name ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+
+/**
+ * Checks a program name against the circuit's programs (`list` = [{id, name}] including Výchozí): -> {id, error}.
+ * `error` is '' when the name can be written: not empty, has a letter or digit, is not Výchozí / `auto`, and neither
+ * its name nor its id is used by another program (`exceptId` = the program being renamed).
+ */
+export function checkProgram(name, list, exceptId = null) {
+  const n = String(name ?? '').trim(), id = slugify(n), low = n.toLocaleLowerCase('cs');
+  const error = !n ? 'Zadej název programu'
+    : !id ? 'Název musí obsahovat písmeno nebo číslici'
+    : id === 'auto' || id === 'vychozi' ? 'Výchozí je vyhrazený název'
+    : list.some((p) => p.id !== exceptId && (p.id === id || String(p.name).trim().toLocaleLowerCase('cs') === low)) ? 'Program s tímto názvem už existuje' : '';
+  return { id, error };
+}
 
 // ---------- element ----------
 
@@ -504,6 +599,9 @@ const ICONS = {
   minus: 'M19,13H5V11H19V13Z',
   check: 'M21,7L9,19L3.5,13.5L4.91,12.09L9,16.17L19.59,5.59L21,7Z',
   checkCircle: 'M12 2C6.5 2 2 6.5 2 12S6.5 22 12 22 22 17.5 22 12 17.5 2 12 2M10 17L5 12L6.41 10.59L10 14.17L17.59 6.58L19 8L10 17Z',
+  cogOutline: 'M12,8A4,4 0 0,1 16,12A4,4 0 0,1 12,16A4,4 0 0,1 8,12A4,4 0 0,1 12,8M12,10A2,2 0 0,0 10,12A2,2 0 0,0 12,14A2,2 0 0,0 14,12A2,2 0 0,0 12,10M10,22C9.75,22 9.54,21.82 9.5,21.58L9.13,18.93C8.5,18.68 7.96,18.34 7.44,17.94L4.95,18.95C4.73,19.03 4.46,18.95 4.34,18.73L2.34,15.27C2.21,15.05 2.27,14.78 2.46,14.63L4.57,12.97L4.5,12L4.57,11L2.46,9.37C2.27,9.22 2.21,8.95 2.34,8.73L4.34,5.27C4.46,5.05 4.73,4.96 4.95,5.05L7.44,6.05C7.96,5.66 8.5,5.32 9.13,5.07L9.5,2.42C9.54,2.18 9.75,2 10,2H14C14.25,2 14.46,2.18 14.5,2.42L14.87,5.07C15.5,5.32 16.04,5.66 16.56,6.05L19.05,5.05C19.27,4.96 19.54,5.05 19.66,5.27L21.66,8.73C21.79,8.95 21.73,9.22 21.54,9.37L19.43,11L19.5,12L19.43,13L21.54,14.63C21.73,14.78 21.79,15.05 21.66,15.27L19.66,18.73C19.54,18.95 19.27,19.04 19.05,18.95L16.56,17.95C16.04,18.34 15.5,18.68 14.87,18.93L14.5,21.58C14.46,21.82 14.25,22 14,22H10M11.25,4L10.88,6.61C9.68,6.86 8.62,7.5 7.82,8.38L5.4,7.35L4.65,8.65L6.76,10.2C6.38,11.3 6.38,12.5 6.76,13.8L4.65,15.35L5.4,16.65L7.82,15.62C8.62,16.5 9.68,17.14 10.88,17.39L11.25,20H12.75L13.12,17.39C14.32,17.14 15.38,16.5 16.18,15.62L18.6,16.65L19.35,15.35L17.24,13.8C17.62,12.7 17.62,11.5 17.24,10.2L19.35,8.65L18.6,7.35L16.18,8.38C15.38,7.5 14.32,6.86 13.12,6.61L12.75,4H11.25Z',
+  close: 'M19,6.41L17.59,5L12,10.59L6.41,5L5,6.41L10.59,12L5,17.59L6.41,19L12,13.41L17.59,19L19,17.59L13.41,12L19,6.41Z',
+  chevronRight: 'M8.59,16.58L13.17,12L8.59,7.41L10,6L16,12L10,18L8.59,16.58Z',
   deleteOutline: 'M6,19A2,2 0 0,0 8,21H16A2,2 0 0,0 18,19V7H6V19M8,9H16V19H8V9M15.5,4L14.5,3H9.5L8.5,4H5V6H19V4H15.5Z',
   split: 'M18,16V13H15V22H13V2H15V11H18V8L22,12L18,16M2,12L6,16V13H9V22H11V2H9V11H6V8L2,12Z',
   fire: 'M17.66 11.2C17.43 10.9 17.15 10.64 16.89 10.38C16.22 9.78 15.46 9.35 14.82 8.72C13.33 7.26 13 4.85 13.95 3C13 3.23 12.17 3.75 11.46 4.32C8.87 6.4 7.85 10.07 9.07 13.22C9.11 13.32 9.15 13.42 9.15 13.55C9.15 13.77 9 13.97 8.8 14.05C8.57 14.15 8.33 14.09 8.14 13.93C8.08 13.88 8.04 13.83 8 13.76C6.87 12.33 6.69 10.28 7.45 8.64C5.78 10 4.87 12.3 5 14.47C5.06 14.97 5.12 15.47 5.29 15.97C5.43 16.57 5.7 17.17 6 17.7C7.08 19.43 8.95 20.67 10.96 20.92C13.1 21.19 15.39 20.8 17.03 19.32C18.86 17.66 19.5 15 18.56 12.72L18.43 12.46C18.22 12 17.66 11.2 17.66 11.2Z',
@@ -594,6 +692,40 @@ const STYLE = `
   .note b { font-size: 15px; font-weight: 600; }
   .note .tx { flex: 1; display: flex; flex-direction: column; gap: 2px; }
   .dim { opacity: .55; }
+  .lrow { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .wbadge { display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 999px; background: var(--c-tint); font-size: 12px; font-weight: 600; }
+  .chip.add { padding: 0 14px 0 10px; gap: 4px; border-style: dashed; background: transparent; box-shadow: none; color: var(--c-text2); }
+  .lbl { display: inline-flex; align-items: center; gap: 8px; }
+  .rep { padding: 2px 8px; border-radius: 999px; border: 1px solid var(--c-border); background: var(--c-card); color: var(--c-text2); font-size: 11px; font-weight: 700; letter-spacing: .3px; }
+  .rep.on { background: var(--c-tint); }
+  .row.offweek .bar { opacity: .55; filter: saturate(.4); }
+  .presets { display: flex; flex-wrap: wrap; gap: 6px; }
+  .preset { min-height: 32px; padding: 0 12px; border: 1px solid var(--c-border); border-radius: 999px; background: var(--c-raised); box-shadow: var(--c-raised-shadow); font-size: 12px; font-weight: 600; }
+  .prow { display: flex; align-items: center; gap: 10px; padding: 8px 8px 8px 12px; border-radius: 16px; background: var(--c-fill); box-shadow: var(--c-inset); }
+  .prow .tx { flex: 1; display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+  .prow .tx b { font-size: 15px; font-weight: 600; overflow-wrap: anywhere; }
+  .prow .tic { width: 32px; height: 32px; flex: none; border-radius: 50%; display: grid; place-items: center; background: var(--c-card); color: var(--c-text2); }
+  .prow .tic.base { background: var(--c-accent); color: var(--c-on-accent); }
+  .field { display: flex; gap: 8px; }
+  .field input { flex: 1; min-width: 0; min-height: 48px; box-sizing: border-box; padding: 0 14px; border-radius: 14px; border: 1px solid var(--c-border); background: var(--c-fill); box-shadow: var(--c-inset); color: var(--c-text); font-size: 15px; font-family: inherit; }
+  .field input:focus-visible { outline: 2px solid var(--c-accent); outline-offset: 2px; }
+  .field .btn { flex: none; }
+  .swrow { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; border-radius: 16px; background: var(--c-fill); box-shadow: var(--c-inset); }
+  .swrow .tx { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .swrow b { font-size: 15px; font-weight: 600; }
+  .switch { flex: none; display: flex; width: 52px; height: 32px; box-sizing: border-box; padding: 3px; align-items: center; border: 0; border-radius: 999px; background: var(--c-border); }
+  .switch::after { content: ''; width: 26px; height: 26px; border-radius: 50%; background: var(--c-card); box-shadow: 0 1px 3px rgba(0,0,0,.3); transition: transform .15s; }
+  .switch[aria-checked="true"] { background: var(--c-accent); }
+  .switch[aria-checked="true"]::after { transform: translateX(20px); }
+  .switch:disabled { opacity: .5; cursor: default; }
+  .hols { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; border-radius: 18px; background: var(--c-fill); box-shadow: var(--c-inset); }
+  .hols b { font-size: 13px; font-weight: 600; }
+  .hols .h { display: flex; justify-content: space-between; gap: 10px; font-size: 13px; }
+  .hols .h span:first-child { flex: none; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .hols .h span:last-child { text-align: right; color: var(--c-text2); }
+  .tile.link { width: 100%; box-sizing: border-box; justify-content: space-between; }
+  .repro { display: inline-flex; align-items: center; align-self: flex-start; padding: 6px 12px; border-radius: 999px; background: var(--c-fill); box-shadow: var(--c-inset); font-size: 13px; font-weight: 600; color: var(--c-text2); }
+  input:disabled { opacity: .5; }
   .err { padding: 10px 14px; border-radius: 14px; background: color-mix(in srgb, var(--c-warm) 14%, var(--c-card)); color: var(--c-text); font-size: 13px; }
   .round { width: 44px; height: 44px; flex: none; display: grid; place-items: center; padding: 0; border: 1px solid var(--c-border); border-radius: 50%; background: var(--c-raised); box-shadow: var(--c-raised-shadow); }
   .btn.small { min-height: 44px; font-size: 13px; }
@@ -679,12 +811,16 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     this._turning = new Set(); // ids with a turn_off in flight
     this._busy = new Set(); // ids of schedules being written (pause toggle), `copy` while the fallback copy runs
     this._seq = 0;
-    this._view = 'week'; // 'week' | 'picker' | 'editor' | 'copy'
+    this._view = 'week'; // 'week' | 'picker' | 'editor' | 'copy' | 'programs' | 'settings'
+    this._pg = null; // programs view state while view is 'programs'
+    this._calNames = new Map(); // calendar entity -> {date: event title}, fetched best effort for the holiday list
     this._copy = null; // copy view state while view is 'copy'
     this._ed = null; // editor state while view is 'editor'
     this._pick = null; // valve picker state while view is 'picker'
     this.shadowRoot.addEventListener('click', (e) => this._click(e));
     this.shadowRoot.addEventListener('change', (e) => this._change(e));
+    this.shadowRoot.addEventListener('input', (e) => this._input(e));
+    this.shadowRoot.addEventListener('keydown', (e) => { if (e.key !== 'Enter' || e.target.tagName !== 'INPUT') return; const a = e.target.dataset?.a; if (a === 'pg-text' || a === 'pg-rtext') this._progAction(a === 'pg-text' ? 'pg-add' : 'pg-rok', e.target.dataset.k); });
     // a render deferred while something in the card had focus runs once the focus leaves
     this.shadowRoot.addEventListener('focusout', () => setTimeout(() => { if (this._dirty) this._render(); }, 0));
   }
@@ -698,7 +834,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     this._prog = null;
     this._progPicked = false; // until a chip is picked the card shows the running program
     this._view = 'week';
-    this._ed = this._pick = this._copy = null;
+    this._ed = this._pick = this._copy = this._pg = null;
     this._sig = null;
     this._render(true);
   }
@@ -739,7 +875,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     if (v === this._valve) return;
     this._valve = v;
     this._prog = null; this._progPicked = false;
-    this._view = 'week'; this._ed = this._pick = this._copy = null;
+    this._view = 'week'; this._ed = this._pick = this._copy = this._pg = null;
   }
 
   connectedCallback() { this._start(); }
@@ -844,6 +980,20 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
 
   _circuit() { return this._cfg.circuits.find((c) => c.id === this._cfg.valveCircuit[this._valve]); }
 
+  /** The holidays the heating rules use for this circuit: `{holidays: Set}`. */
+  _ctx(circuit = this._circuit(), now = new Date()) {
+    // rebuilt only when the circuit, the mode, the year or the imported dates (by reference) change, not on every render
+    const st = this._hass?.states, mode = st?.[`input_select.heating_holidays_${circuit.id}`]?.state, dates = st?.[`sensor.heating_programs_${circuit.id}`]?.attributes?.holiday_dates;
+    const m = this._holMemo?.get(circuit.id), year = now.getFullYear();
+    if (m && m.mode === mode && m.year === year && m.dates === dates) return { holidays: m.set };
+    const set = holidayDates(st, circuit.id, now);
+    (this._holMemo ??= new Map()).set(circuit.id, { mode, year, dates, set });
+    return { holidays: set };
+  }
+
+  /** *Střídat lichý a sudý týden* is on for the circuit (it only shows the week controls; the tags always count). */
+  _alternates(circuit = this._circuit()) { return this._hass?.states?.[`input_boolean.heating_week_alternation_${circuit.id}`]?.state === 'on'; }
+
   /** Everything the week view reads from the states; a change of any of it re-renders. */
   _signature() {
     const st = this._hass?.states ?? {};
@@ -859,7 +1009,10 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
       a(`sensor.heating_off_schedule_${id}`, 'window_open_climates'),
       a(`sensor.heating_valves_${id}`, 'phases')?.[v]?.[0], a(`sensor.heating_valves_${id}`, 'forced'), a(`sensor.heating_valves_${id}`, 'closed'),
       s(`sensor.heating_applying_${id}`), a(`sensor.heating_applying_${id}`, 'left'),
-      a(`sensor.heating_schedule_${id}`, 'targets'),
+      a(`sensor.heating_schedule_${id}`, 'targets'), a(`sensor.heating_schedule_${id}`, 'holidays_next'),
+      s(`input_boolean.heating_week_alternation_${id}`), s(`input_select.heating_holidays_${id}`), s(`input_text.heating_holiday_calendar_${id}`),
+      a(`sensor.heating_programs_${id}`, 'programs'), a(`sensor.heating_programs_${id}`, 'holiday_dates'), a(`sensor.heating_programs_${id}`, 'holiday_error'),
+      this._view === 'settings' ? Object.keys(st).filter((e) => e.startsWith('calendar.')) : null,
     ]);
   }
 
@@ -879,6 +1032,10 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
       const ev = new CustomEvent('hsc-edit', { bubbles: true, composed: true, cancelable: true, detail: { valve: this._valve, program: this._prog, schedule: id ? this._schedules.find((s) => s.id === id) : null } });
       if (this.dispatchEvent(ev)) this._onEdit(ev);
     } else if (a === 'copyOpen') this._announceCopy({ valve: this._valve, program: this._prog, schedule: null });
+    else if (a === 'cog') { this._view = 'settings'; this._fetchCalNames(); this._render(true); }
+    else if (a === 'addprog') this._openPrograms('week');
+    else if (a.startsWith('pg-')) this._progAction(a, el.dataset.k);
+    else if (a.startsWith('st-')) this._settingsAction(a, el.dataset.k);
     else if (a.startsWith('cp-')) { if (a !== 'cp-prog') this._copyAction(a, el.dataset.k); }
     else if (a === 'copyDefault') this._copyDefault();
     else this._editorAction(el.dataset);
@@ -891,6 +1048,15 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     else if (el.dataset.a === 'pause') this._pause(el.dataset.id, !el.checked);
     else if (el.dataset.a === 'pickprog' && this._pick) { this._pick.program = el.value; this._render(true); }
     else if (el.dataset.a === 'cp-prog' && this._copy) { this._copy.targetProgram = el.value; this._render(true); }
+    else if (el.dataset.a === 'st-cal') this._settingsAction('st-cal', el.value);
+  }
+
+  /** Typing in a programs-view input: kept in the state, the message and buttons are patched in place (a rebuild would drop the focus). */
+  _input(e) {
+    const a = e.target.dataset?.a, pg = this._pg;
+    if (!pg || (a !== 'pg-text' && a !== 'pg-rtext')) return;
+    if (a === 'pg-text') pg.text = e.target.value; else pg.rtext = e.target.value;
+    this._patchProgram();
   }
 
   // ---------- editor ----------
@@ -913,16 +1079,21 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
   }
 
   _openExisting(s) {
-    this._ed = { existing: s, valves: [s.valve], program: s.program, days: [...s.days], slots: normalizeSlots(s.slots), sel: 0, confirm: false, stale: false };
+    this._ed = { existing: s, valves: [s.valve], program: s.program, week: s.week, days: [...s.days], slots: normalizeSlots(s.slots), sel: 0, confirm: false, stale: false };
     this._view = 'editor';
   }
 
   /** A new schedule: one slot 00:00-24:00 at 20 °C, the weekdays no schedule of these valves and the program uses yet. */
   _newEditor(valves, program) {
-    const used = valves.flatMap((v) => daysConflict(this._schedules, v, program, DAYS));
-    this._ed = { existing: null, valves, program, days: DAYS.filter((d) => !used.includes(d)), slots: [{ start: 0, end: DAY_END, temp: 20 }], sel: 0, confirm: false, stale: false };
+    this._ed = { existing: null, valves, program, week: null, days: this._freeDays(valves, program, null), slots: [{ start: 0, end: DAY_END, temp: 20 }], sel: 0, confirm: false, stale: false };
     this._pick = null;
     this._view = 'editor';
+  }
+
+  /** The weekdays no schedule of `valves` in `program` and a week overlapping `week` uses yet. */
+  _freeDays(valves, program, week) {
+    const used = valves.flatMap((v) => daysConflict(this._schedules, v, program, DAYS, null, week));
+    return DAYS.filter((d) => !used.includes(d));
   }
 
   /** Why the editor's copy button is off, or ''. Only a stored, active schedule without unsaved edits is copied. */
@@ -930,14 +1101,14 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     if (!ed.existing) return '';
     if (ed.existing.paused) return 'Pozastavený rozvrh se nekopíruje';
     const days = DAYS.filter((d) => ed.days.includes(d));
-    return sameContent({ program: ed.program, days, slots: ed.slots }, ed.existing) ? '' : 'Nejdřív uložte rozvrh';
+    return sameContent({ program: ed.program, week: ed.week, days, slots: ed.slots }, ed.existing) ? '' : 'Nejdřív uložte rozvrh';
   }
 
   /** Why Uložit is disabled, or ''. */
   _saveBlock(ed) {
     if (!ed.days.length) return 'Vyber aspoň jeden den';
     const title = (v) => this._hass?.states?.[v]?.attributes?.friendly_name || v;
-    const parts = ed.valves.map((v) => [v, daysConflict(this._schedules, v, ed.program, ed.days, ed.existing?.id)]).filter(([, d]) => d.length);
+    const parts = ed.valves.map((v) => [v, daysConflict(this._schedules, v, ed.program, ed.days, ed.existing?.id, ed.week)]).filter(([, d]) => d.length);
     if (!parts.length) return '';
     return parts.map(([v, d]) => `${ed.valves.length > 1 ? `${title(v)}: ` : ''}${d.map((x) => DAY_LABELS[x]).join(', ')} už má jiný rozvrh`).join(' · ');
   }
@@ -965,7 +1136,13 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
       return this._render(true);
     }
     if (this._view !== 'editor' || !ed) return;
-    if (a === 'day') ed.days = ed.days.includes(k) ? ed.days.filter((d) => d !== k) : [...ed.days, k];
+    if (a === 'day') { ed.days = ed.days.includes(k) ? ed.days.filter((d) => d !== k) : [...ed.days, k]; ed.daysTouched = true; }
+    else if (a === 'preset') { ed.days = [...DAY_ALIASES[k]]; ed.daysTouched = true; }
+    else if (a === 'wk') {
+      ed.week = k === 'all' ? null : k;
+      // a new schedule's untouched days follow the chosen week (the days free for that parity)
+      if (!ed.existing && !ed.daysTouched) ed.days = this._freeDays(ed.valves, ed.program, ed.week);
+    }
     else if (a === 'sel') ed.sel = i;
     else if (a === 'sdn' || a === 'sup') ed.slots = moveBoundary(ed.slots, ed.sel, a === 'sdn' ? -step : step, step);
     else if (a === 'edn' || a === 'eup') ed.slots = moveBoundary(ed.slots, ed.sel + 1, a === 'edn' ? -step : step, step);
@@ -984,7 +1161,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     this._render(true);
   }
 
-  _leave() { this._view = 'week'; this._ed = this._pick = this._copy = null; }
+  _leave() { this._view = 'week'; this._ed = this._pick = this._copy = this._pg = null; }
 
   _saveEditor() {
     const ed = this._ed;
@@ -993,15 +1170,15 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
       const fresh = await loadSchedules(this._hass); // the stored state right now, not the list from a while ago
       if (ed.existing) {
         const cur = fresh.find((x) => x.id === ed.existing.id);
-        if (!cur || !cur.editable) throw new Error('Rozvrh už neexistuje nebo ho nelze upravovat');
+        if (!cur || !cur.editable) throw new Error(`Rozvrh ${schedName(ed.existing)} už neexistuje nebo ho nelze upravovat`);
         if (!sameContent(cur, ed.existing)) { ed.stale = true; return; } // changed elsewhere: ask instead of overwriting
         // days, slots and program come from the editor; paused, name, foreign tags and dates from the stored version
-        await this._save({ id: cur.id, valve: cur.valve, program: ed.program, days: ed.days, slots: ed.slots, paused: cur.paused }, cur);
+        await this._save({ id: cur.id, valve: cur.valve, program: ed.program, week: ed.week, days: ed.days, slots: ed.slots, paused: cur.paused }, cur);
       } else {
-        if (ed.valves.some((v) => daysConflict(fresh, v, ed.program, ed.days).length)) throw new Error('Některý z dnů už má jiný rozvrh');
+        if (ed.valves.some((v) => daysConflict(fresh, v, ed.program, ed.days, null, ed.week).length)) throw new Error('Některý z dnů už má jiný rozvrh');
         const before = new Set(fresh.map((x) => x.id));
         const days = DAYS.filter((d) => ed.days.includes(d));
-        const expected = ed.valves.map((valve) => ({ valve, program: ed.program, days, slots: ed.slots }));
+        const expected = ed.valves.map((valve) => ({ valve, program: ed.program, week: ed.week, days, slots: ed.slots }));
         try {
           for (const e of expected) await this._save({ ...e, paused: false });
         } catch (err) { await this._rollback(before, expected); throw err; }
@@ -1024,7 +1201,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     try {
       const left = [...expected];
       for (const c of (await loadSchedules(this._hass)).filter((x) => !before.has(x.id))) {
-        const k = left.findIndex((e) => e.valve === c.valve && e.program === c.program && c.days.join() === e.days.join() && slotKey(c.slots) === slotKey(e.slots));
+        const k = left.findIndex((e) => e.valve === c.valve && e.program === c.program && (e.week ?? null) === c.week && c.days.join() === e.days.join() && slotKey(c.slots) === slotKey(e.slots));
         if (k < 0) continue;
         left.splice(k, 1);
         this._created.delete(c.id);
@@ -1082,7 +1259,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     if (this._busy.has('copy') || !src.length || !isFallbackProgram(groups, prog)) return;
     return this._write('copy', async () => {
       const before = new Set((await loadSchedules(this._hass)).map((x) => x.id));
-      const expected = src.map((s) => ({ valve: s.valve, program: prog, days: s.days, slots: s.slots }));
+      const expected = src.map((s) => ({ valve: s.valve, program: prog, week: s.week, days: s.days, slots: s.slots }));
       try {
         for (const s of src) await this._save({ ...s, id: undefined, program: prog, paused: false });
       } catch (err) { await this._rollback(before, expected); throw err; } // roll back the copies already added, report the original error
@@ -1235,7 +1412,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
       const bar = (s) => `<span class="bar mini">${barSegments(s).map((x) => `<span class="seg" style="flex:${x.end - x.start} 1 0;--c:${tempColor(x.temp, dark)}"></span>`).join('')}</span>`;
       which = `<div class="col"><span class="label">Které rozvrhy</span>${rows.map((s) => {
         const on = c.ids.includes(s.id);
-        return tile('cp-row', s.id, on, false, on ? 'checkCircle' : 'calendarWeek', ' wide cal', `${pname(s.program)} · ${daysLabel(s.days)}`, bar(s));
+        return tile('cp-row', s.id, on, false, on ? 'checkCircle' : 'calendarWeek', ' wide cal', `${pname(s.program)} · ${schedName(s)}`, bar(s));
       }).join('')}
         <label class="tile sel"><span class="tx"><span class="sec">Do programu</span><b>${esc(c.targetProgram === 'same' ? 'Stejného jako zdroj' : pname(c.targetProgram))}</b></span>${icon('chevronDown')}
           <select data-a="cp-prog" aria-label="Do programu" ${dis}><option value="same"${c.targetProgram === 'same' ? ' selected' : ''}>Stejného jako zdroj</option>${
@@ -1269,6 +1446,229 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
         <button type="button" class="btn wide" data-a="cp-back" data-k="c" ${dis}>Zrušit</button>
         <button type="button" class="btn primary wide" data-a="cp-go" data-k="" ${busy || !changes ? 'disabled' : ''}>${busy ? '' : icon('contentCopy')}${esc(go)}</button>
       </div>`;
+  }
+
+  // ---------- programs ----------
+
+  _openPrograms(prev) {
+    if (this._view !== 'week' && this._view !== 'settings') return;
+    this._pg = { prev, text: '', renaming: null, rtext: '', confirm: null };
+    this._view = 'programs';
+    this._render(true);
+  }
+
+  /**
+   * The circuit's programs besides Výchozí, from `sensor.heating_program_<c>` (`programs` / `program_names`, legacy `program:` tags
+   * included: the one list the chips, editor and picker use). Entries keep the fields the stored list has besides id and name.
+   */
+  _progList(c) {
+    const stored = this._hass?.states?.[`sensor.heating_programs_${c.id}`]?.attributes?.programs;
+    const byId = new Map((Array.isArray(stored) ? stored : []).filter((p) => p && typeof p.id === 'string').map((p) => [p.id, p]));
+    const view = this._hass?.states?.[`sensor.heating_program_${c.id}`]?.attributes;
+    const ids = Array.isArray(view?.programs) ? view.programs : [...byId.keys()];
+    return ids.filter((id) => id !== 'auto').map((id) => ({ ...byId.get(id), id, name: String(view?.program_names?.[id] ?? byId.get(id)?.name ?? id) }));
+  }
+
+  /** Schedules of program `id` on the circuit's valves: {all, editable, readonly: n, valves: n}. */
+  _progStats(c, id) {
+    const mine = this._schedules.filter((s) => s.program === id && s.valves.some((v) => c.valves.includes(v)));
+    return { n: mine.length, ro: mine.filter((s) => !s.editable).length, valves: new Set(mine.flatMap((s) => s.valves.filter((v) => c.valves.includes(v)))).size };
+  }
+
+  _progAction(a, k) {
+    const pg = this._pg;
+    if (this._view !== 'programs' || !pg) return;
+    if (this._busy.has('pg')) return;
+    if (a === 'pg-back') { this._view = pg.prev; this._pg = null; }
+    else if (a === 'pg-add') return this._addProgram();
+    else if (a === 'pg-ren') { pg.renaming = k; pg.rtext = this._progList(this._circuit()).find((p) => p.id === k)?.name ?? ''; pg.confirm = null; }
+    else if (a === 'pg-rcancel') { pg.renaming = null; pg.rtext = ''; }
+    else if (a === 'pg-rok') return this._renameProgram(k);
+    else if (a === 'pg-del') {
+      const st = this._progStats(this._circuit(), k);
+      pg.confirm = { id: k, n: st.n, ro: st.ro > 0, running: this._programs(this._circuit()).running === k };
+      pg.renaming = null;
+    }
+    else if (a === 'pg-delno') pg.confirm = null;
+    else if (a === 'pg-delok') return this._deleteProgram(k);
+    this._render(true);
+  }
+
+  /** Writes the whole list through the circuit's script and waits until both program sensors show it (see `_programsShown`). */
+  async _setPrograms(c, list) {
+    await this._hass.callService('script', `heating_programs_set_${c.id}`, { programs: list });
+    const wait = async (n) => { for (let i = 0; i < n; i++) { if (this._programsShown(c, list)) return true; await new Promise((r) => setTimeout(r, 250)); } return this._programsShown(c, list); };
+    if (await wait(24)) return;
+    // a slow read-back is not a failure: look once more after 5 s before reporting anything
+    await new Promise((r) => setTimeout(r, 5000));
+    if (this._programsShown(c, list)) return;
+    throw Object.assign(new Error('Seznam se možná neuložil — zkontrolujte'), { unsure: true });
+  }
+
+  /** `sensor.heating_programs_<c>` holds exactly `list` (id, name) and `sensor.heating_program_<c>` (legacy tags included) lists each with its name. */
+  _programsShown(c, list) {
+    const st = this._hass?.states ?? {}, key = (l) => JSON.stringify(l.map((p) => [p.id, p.name]));
+    const stored = st[`sensor.heating_programs_${c.id}`]?.attributes?.programs, view = st[`sensor.heating_program_${c.id}`]?.attributes;
+    return Array.isArray(stored) && key(stored) === key(list) && list.every((p) => view?.programs?.includes(p.id) && (view?.program_names?.[p.id] ?? p.id) === p.name);
+  }
+
+  _addProgram() {
+    const pg = this._pg, c = this._circuit(), list = this._progList(c);
+    const chk = checkProgram(pg.text, [{ id: 'auto', name: 'Výchozí' }, ...list]);
+    if (chk.error) return;
+    return this._write('pg', async () => { await this._setPrograms(c, [...list, { id: chk.id, name: pg.text.trim() }]); pg.text = ''; });
+  }
+
+  _renameProgram(id) {
+    const pg = this._pg, c = this._circuit(), list = this._progList(c);
+    const chk = checkProgram(pg.rtext, [{ id: 'auto', name: 'Výchozí' }, ...list], id);
+    if (chk.error) return;
+    return this._write('pg', async () => { await this._setPrograms(c, list.map((p) => (p.id === id ? { ...p, name: pg.rtext.trim() } : p))); pg.renaming = null; pg.rtext = ''; });
+  }
+
+  /**
+   * Deletes a program: the list entry first (waits for the read-back), then its schedules on the circuit's valves. The stored
+   * schedules are re-read first; the running program, a read-only schedule, or a count other than the confirmed one stops it
+   * before anything is written. A failing removal puts the removed schedules back (added again from their stored versions) and
+   * the old list. A read-back that does not show up is reported, never rolled back (the write may still land).
+   */
+  _deleteProgram(id) {
+    const pg = this._pg, c = this._circuit(), list = this._progList(c);
+    if (!pg.confirm || pg.confirm.id !== id || pg.confirm.ro || pg.confirm.running) return;
+    return this._write('pg', async () => {
+      if (this._programs(c).running === id) throw new Error(RUNNING_MSG);
+      const fresh = await loadSchedules(this._hass);
+      const mine = fresh.filter((s) => s.program === id && s.valves.some((v) => c.valves.includes(v)));
+      if (mine.some((s) => !s.editable)) throw new Error('Program má rozvrh jen ke čtení, ten smaž jinde');
+      if (mine.length !== pg.confirm.n) { pg.confirm = null; throw new Error('Rozvrhy se mezitím změnily, zkontroluj program a zkus to znovu'); }
+      await this._setPrograms(c, list.filter((p) => p.id !== id));
+      const removed = [];
+      try {
+        for (const s of mine) { await removeSchedule(this._hass, s.id); removed.push(s); }
+      } catch (err) {
+        try {
+          for (const old of removed) await this._save({ ...old, id: undefined }, { raw: old.raw });
+          await this._setPrograms(c, list);
+        } catch { /* the original error is the one to show */ }
+        throw err;
+      }
+      pg.confirm = null;
+    });
+  }
+
+  /** Updates the validation message and the buttons of the programs view in place (a rebuild would drop the focus). */
+  _patchProgram() {
+    const pg = this._pg, root = this.shadowRoot, c = this._circuit();
+    if (!pg || !c) return;
+    const all = [{ id: 'auto', name: 'Výchozí' }, ...this._progList(c)];
+    const busy = this._busy.has('pg');
+    const put = (sel, text, dis) => { const el = root.querySelector(sel); if (!el) return; if (text != null) el.textContent = text; if (dis != null) el.disabled = dis; };
+    const add = checkProgram(pg.text, all);
+    put('[data-pg="msg"]', pg.text.trim() ? add.error : '');
+    put('[data-a="pg-add"]', null, !!add.error || busy);
+    if (pg.renaming) {
+      const ren = checkProgram(pg.rtext, all, pg.renaming);
+      put('[data-pg="rmsg"]', pg.rtext.trim() ? ren.error : '');
+      put('[data-a="pg-rok"]', null, !!ren.error || busy);
+    }
+  }
+
+  _programsHtml(circuit, errHtml) {
+    const pg = this._pg, busy = this._busy.has('pg'), dis = busy ? 'disabled' : '';
+    const list = this._progList(circuit), all = [{ id: 'auto', name: 'Výchozí' }, ...list];
+    const add = checkProgram(pg.text, all);
+    const rows = all.map((p) => {
+      const st = this._progStats(circuit, p.id);
+      const sub = p.id === 'auto' ? `${plural(st.valves, 'hlavice', 'hlavice', 'hlavic')} · ${plural(st.n, 'rozvrh', 'rozvrhy', 'rozvrhů')} · platí, když program nemá svůj`
+        : st.n ? `${plural(st.valves, 'hlavice', 'hlavice', 'hlavic')} · ${plural(st.n, 'rozvrh', 'rozvrhy', 'rozvrhů')}` : 'zatím bez rozvrhů · jede podle Výchozího';
+      const ic = `<span class="tic${p.id === 'auto' ? ' base' : ''}">${icon('calendarWeek', 18)}</span>`;
+      if (p.id === 'auto') return `<div class="prow">${ic}<div class="tx"><b>${esc(p.name)}</b><span class="sec">${esc(sub)}</span></div></div>`;
+      if (pg.renaming === p.id) {
+        const ren = checkProgram(pg.rtext, all, p.id);
+        return `<div class="prow" style="flex-wrap:wrap">${ic}<div class="field" style="flex:1 1 180px"><input type="text" data-a="pg-rtext" data-k="${esc(p.id)}" value="${esc(pg.rtext)}" aria-label="Nový název programu ${esc(p.name)}" ${dis}></div>
+          <button type="button" class="round" data-a="pg-rok" data-k="${esc(p.id)}" aria-label="Uložit název" ${ren.error || busy ? 'disabled' : ''}>${icon('check')}</button>
+          <button type="button" class="round" data-a="pg-rcancel" data-k="" aria-label="Zrušit přejmenování" ${dis}>${icon('close')}</button>
+          <span class="why" data-pg="rmsg" role="status" style="flex:1 1 100%">${esc(pg.rtext.trim() ? ren.error : '')}</span></div>`;
+      }
+      return `<div class="prow">${ic}<div class="tx"><b>${esc(p.name)}</b><span class="sec">${esc(sub)}</span></div>
+        <button type="button" class="round" data-a="pg-ren" data-k="${esc(p.id)}" aria-label="Přejmenovat ${esc(p.name)}" ${dis}>${icon('pencil', 18)}</button>
+        <button type="button" class="round" data-a="pg-del" data-k="${esc(p.id)}" aria-label="Smazat program ${esc(p.name)}" ${dis}>${icon('deleteOutline', 18)}</button></div>`;
+    }).join('');
+    const cf = pg.confirm, cfName = cf && all.find((p) => p.id === cf.id)?.name;
+    const confirm = cf ? `<div class="confirm" role="alertdialog" aria-label="Smazat program"><span>${cf.running ? RUNNING_MSG : cf.ro ? `Program ${esc(cfName)} má rozvrh jen ke čtení, ten smaž jinde.`
+        : `Smazat program ${esc(cfName)}${cf.n ? ` a jeho ${plural(cf.n, 'rozvrh', 'rozvrhy', 'rozvrhů')}` : ''}?`}</span>
+        <button type="button" class="btn small" data-a="pg-delno" data-k="" ${dis}>${cf.ro || cf.running ? 'Zavřít' : 'Zrušit'}</button>${cf.ro || cf.running ? '' : `<button type="button" class="btn small danger" data-a="pg-delok" data-k="${esc(cf.id)}" ${dis}>Smazat</button>`}</div>` : '';
+    return `<div class="head">
+        <button type="button" class="round" data-a="pg-back" data-k="" aria-label="Zpět" ${dis}>${icon('chevronLeft')}</button>
+        <div class="t"><span class="sec">Okruh ${esc(circuitName(this._hass, circuit))}</span><span class="title">Programy</span></div>
+      </div>
+      ${errHtml}${confirm}
+      <div class="col">${rows}</div>
+      <div class="col"><label class="label" for="newprog">Nový program</label>
+        <div class="field"><input id="newprog" type="text" data-a="pg-text" data-k="" value="${esc(pg.text)}" placeholder="Název, např. Chata" autocomplete="off" ${dis}>
+          <button type="button" class="btn primary" data-a="pg-add" data-k="" ${add.error || busy ? 'disabled' : ''}>${icon('plus')}Přidat</button></div>
+        <span class="why" data-pg="msg" role="status">${esc(pg.text.trim() ? add.error : '')}</span>
+        <span class="sec">Nový program jede podle Výchozího, dokud mu nepřidáte vlastní rozvrh. Program se vybírá v kartě okruhu.</span></div>`;
+  }
+
+  // ---------- settings ----------
+
+  /** Titles of a calendar's events by date (calendar.get_events), best effort: a failure leaves the holiday names blank. */
+  async _fetchCalNames(entity) {
+    const c = this._circuit(), st = this._hass?.states ?? {};
+    const ent = entity ?? st[`input_text.heating_holiday_calendar_${c?.id}`]?.state;
+    if (!c || typeof ent !== 'string' || !ent.startsWith('calendar.') || this._calNames.has(ent)) return;
+    this._calNames.set(ent, {});
+    try {
+      const from = new Date(), to = new Date(from.getFullYear() + 1, from.getMonth(), from.getDate());
+      const r = await this._hass.callWS({ type: 'call_service', domain: 'calendar', service: 'get_events', return_response: true,
+        service_data: { entity_id: ent, start_date_time: `${ymd(from)} 00:00:00`, end_date_time: `${ymd(to)} 00:00:00` } });
+      const names = {};
+      for (const ev of r?.response?.[ent]?.events ?? []) if (ev.summary) names[String(ev.start).slice(0, 10)] ??= ev.summary;
+      this._calNames.set(ent, names);
+      if (this._view === 'settings') this._render();
+    } catch { this._calNames.delete(ent); }
+  }
+
+  _settingsAction(a, k) {
+    const c = this._circuit(), id = c.id;
+    const call = (domain, service, data) => Promise.resolve().then(() => this._hass.callService(domain, service, data)).catch((err) => this._fail(err));
+    if (a === 'st-back') { this._view = 'week'; this._render(true); }
+    else if (a === 'st-prog') this._openPrograms('settings');
+    else if (a === 'st-alt') call('input_boolean', 'toggle', { entity_id: `input_boolean.heating_week_alternation_${id}` });
+    else if (a === 'st-hol') call('input_select', 'select_option', { entity_id: `input_select.heating_holidays_${id}`, option: k }).then(() => k === 'calendar' && this._fetchCalNames());
+    else if (a === 'st-cal') call('input_text', 'set_value', { entity_id: `input_text.heating_holiday_calendar_${id}`, value: k }).then(() => this._fetchCalNames(k));
+  }
+
+  _settingsHtml(circuit, errHtml) {
+    const id = circuit.id, st = this._hass?.states ?? {}, att = (e, a) => st[e]?.attributes?.[a];
+    const alt = this._alternates(circuit), mode = st[`input_select.heating_holidays_${id}`]?.state ?? 'none';
+    const cal = st[`input_text.heating_holiday_calendar_${id}`]?.state ?? '';
+    const parity = weekParity(new Date());
+    const calendars = Object.keys(st).filter((e) => e.startsWith('calendar.'));
+    if (cal && !calendars.includes(cal)) calendars.unshift(cal);
+    const names = this._calNames.get(cal) ?? {};
+    const next = (Array.isArray(att(`sensor.heating_schedule_${id}`, 'holidays_next')) ? att(`sensor.heating_schedule_${id}`, 'holidays_next') : []);
+    const fmt = (iso) => `${Number(String(iso).slice(8, 10))}. ${Number(String(iso).slice(5, 7))}.`;
+    const tab = (k, label) => `<button type="button" class="tab" data-a="st-hol" data-k="${k}" aria-pressed="${mode === k}" ${st[`input_select.heating_holidays_${id}`] ? '' : 'disabled'}>${label}</button>`;
+    const err = mode === 'calendar' ? att(`sensor.heating_programs_${id}`, 'holiday_error') : null;
+    const picker = mode === 'calendar' ? `<label class="tile sel"><span class="tx"><span class="sec">Kalendář svátků (integrace Holiday)</span><b>${esc(cal || 'Vyber kalendář')}</b></span>${icon('chevronDown')}
+        <select data-a="st-cal" aria-label="Kalendář svátků"><option value=""${cal ? '' : ' selected'}>Vyber kalendář</option>${calendars.map((e) => `<option value="${esc(e)}"${e === cal ? ' selected' : ''}>${esc(e)}</option>`).join('')}</select></label>
+        <span class="sec">Kalendář přidáte integrací Holiday (Nastavení › Zařízení a služby › Přidat integraci › Holiday).</span>${err ? `<div class="err">Kalendář se nenačetl: ${esc(err)}</div>` : ''}` : '';
+    const hols = mode === 'none' ? '' : `<div class="hols"><b>Nejbližší svátky · ve svátek se jede podle rozvrhu neděle</b>${next.length
+      ? next.map((h) => `<div class="h"><span>${esc(fmt(h.date))}</span><span>${esc(h.name ?? names[h.date] ?? '')}</span></div>`).join('') : '<span class="sec">Žádné nadcházející svátky.</span>'}</div>`;
+    const progs = this._progList(circuit);
+    return `<div class="head">
+        <button type="button" class="round" data-a="st-back" data-k="" aria-label="Zpět">${icon('chevronLeft')}</button>
+        <div class="t"><span class="sec">Okruh ${esc(circuitName(this._hass, circuit))}</span><span class="title">Nastavení rozvrhů</span></div>
+      </div>
+      ${errHtml}
+      <div class="swrow"><div class="tx"><b>Střídat lichý a sudý týden</b><span class="sec">Rozvrh pak platí každý týden, jen v lichém, nebo jen v sudém. Teď je ${WEEK_LABEL[parity]} týden.</span></div>
+        <button type="button" class="switch" role="switch" aria-checked="${alt}" aria-label="Střídat lichý a sudý týden" data-a="st-alt" data-k="" ${st[`input_boolean.heating_week_alternation_${id}`] ? '' : 'disabled'}></button></div>
+      <div class="col"><span class="label">Státní svátky</span>
+        <div class="tabs">${tab('none', 'Žádné')}${tab('cz', 'České')}${tab('calendar', 'Z kalendáře')}</div>
+        ${picker}${hols}</div>
+      <button type="button" class="tile link" data-a="st-prog" data-k=""><span class="tx"><b>Programy</b><span class="sec">${esc(['Výchozí', ...progs.map((p) => p.name)].join(', '))}</span></span>${icon('chevronRight')}</button>`;
   }
 
   // ---------- render ----------
@@ -1306,23 +1706,26 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     const prog = this._prog, progName = list.find((p) => p.id === prog).name;
     const title = states[valve]?.attributes?.friendly_name || valve;
 
-    const ns = nowState({ states, circuit: circuit.id, valve, schedules: this._schedules, program: running, now, nValves: circuit.valves.length });
+    const ctx = this._ctx(circuit, now), alt = this._alternates(circuit), parity = weekParity(now);
+    const ns = nowState({ states, circuit: circuit.id, valve, schedules: this._schedules, program: running, now, nValves: circuit.valves.length, ctx });
     const toneCss = ns.tone == null ? '' : ns.tone === 'cold' ? 'var(--c-cold)' : ns.tone === 'warm' ? 'var(--c-warm)' : ns.tone === 'accent' ? 'var(--c-accent)' : tempColor(ns.tone, dark);
 
-    const today = dow(now), frac = (now.getHours() * 60 + now.getMinutes()) / 1440;
+    const today = ctx.holidays.has(ymd(now)) ? 'sun' : dow(now), frac = (now.getHours() * 60 + now.getMinutes()) / 1440;
     const seg = (x) => `<span class="seg" style="flex:${x.end - x.start} 1 0;--c:${tempColor(x.temp, dark)}">${x.end - x.start >= 150 ? `${fmtTemp(x.temp)}°` : ''}</span>`;
-    const bar = (s, line) => `<div class="bar" ${line ? 'data-a="open" data-id="' + esc(s.id) + '"' : ''}>${barSegments(s).map(seg).join('')}${line && s.days.includes(today) ? `<i class="nowline" style="left:calc(3px + (100% - 6px) * ${frac.toFixed(4)})"></i>` : ''}</div>`;
+    const bar = (s, line) => `<div class="bar" ${line ? 'data-a="open" data-id="' + esc(s.id) + '"' : ''}>${barSegments(s).map(seg).join('')}${line && s.days.includes(today) && (!s.week || s.week === parity) ? `<i class="nowline" style="left:calc(3px + (100% - 6px) * ${frac.toFixed(4)})"></i>` : ''}</div>`;
     const ruler = '<div class="ruler"><span>0</span><span>6</span><span>12</span><span>18</span><span>24</span></div>';
+    // a schedule tagged for one parity shows its pill; one not valid this week is dimmed (the tags count whatever the switch says)
+    const pill = (s) => (s.week ? `<span class="rep${s.week === 'odd' ? ' on' : ''}">${WEEK_LABEL[s.week]}</span>` : '');
     const row = (s) => {
       const label = esc(daysLabel(s.days));
       const sub = !s.editable ? 'Jen ke čtení (upraveno jinde)' : s.paused ? 'Pozastaveno' : slotsSummary(s);
       const head = s.editable
-        ? `<button type="button" class="open" data-a="open" data-id="${esc(s.id)}" aria-label="Upravit rozvrh ${label}"><b>${label}</b><span class="sec">${sub}</span></button>`
-        : `<span class="open"><b>${label}</b><span class="sec">${sub}</span></span>`;
+        ? `<button type="button" class="open" data-a="open" data-id="${esc(s.id)}" aria-label="Upravit rozvrh ${label}"><span class="lbl"><b>${label}</b>${pill(s)}</span><span class="sec">${sub}</span></button>`
+        : `<span class="open"><span class="lbl"><b>${label}</b>${pill(s)}</span><span class="sec">${sub}</span></span>`;
       const sw = s.editable
         ? `<label class="sw"><input type="checkbox" role="switch" data-a="pause" data-id="${esc(s.id)}" ${s.paused ? '' : 'checked'} ${this._busy.has(s.id) ? 'disabled' : ''}><span class="knob"></span>Aktivní</label>`
         : '';
-      return `<div class="row${s.paused ? ' paused' : ''}${s.editable ? '' : ' ro'}"><div class="top">${head}${sw}</div>${bar(s, s.editable)}${ruler}</div>`;
+      return `<div class="row${s.paused ? ' paused' : ''}${s.editable ? '' : ' ro'}${s.week && s.week !== parity ? ' offweek' : ''}"><div class="top">${head}${sw}</div>${bar(s, s.editable)}${ruler}</div>`;
     };
 
     const groups = groupByProgram(this._schedules, valve);
@@ -1338,7 +1741,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
           <span class="ic">${icon('calendarWeek')}</span>
           <div class="tx"><b>${esc(progName)} používá výchozí rozvrh</b><span class="sec">Hlavice pojede podle Výchozího, dokud tu nebude vlastní rozvrh.</span></div>
         </div>
-        <div class="rows dim">${dflt.map((s) => `<div class="row${s.editable ? '' : ' ro'}"><div class="top"><span class="open"><b>${esc(daysLabel(s.days))}</b><span class="sec">Výchozí</span></span></div>${bar(s, false)}</div>`).join('') || '<span class="sec">Výchozí rozvrh nemá žádné úseky.</span>'}</div>
+        <div class="rows dim">${dflt.map((s) => `<div class="row${s.editable ? '' : ' ro'}"><div class="top"><span class="open"><span class="lbl"><b>${esc(daysLabel(s.days))}</b>${pill(s)}</span><span class="sec">Výchozí</span></span></div>${bar(s, false)}</div>`).join('') || '<span class="sec">Výchozí rozvrh nemá žádné úseky.</span>'}</div>
         <button type="button" class="btn primary wide" data-a="copyDefault" ${copyable && !this._busy.has('copy') ? '' : 'disabled'}>${icon('contentCopy')}Vlastní rozvrh pro ${esc(progName.toLowerCase())}</button>`;
     }
 
@@ -1354,12 +1757,14 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     let html;
     if (this._view === 'editor' && this._ed) html = wrap(this._editorHtml(dark, errHtml), tempColor(this._ed.slots[this._ed.sel].temp, dark));
     else if (this._view === 'copy' && this._copy) html = wrap(this._copyHtml(errHtml), null);
+    else if (this._view === 'programs' && this._pg) html = wrap(this._programsHtml(circuit, errHtml), null);
+    else if (this._view === 'settings') html = wrap(this._settingsHtml(circuit, errHtml), null);
     else if (this._view === 'picker' && this._pick) {
       const plist = this._pickerPrograms();
       if (!plist.some((p) => p.id === this._pick.program)) this._pick.program = 'auto';
       html = wrap(this._pickerHtml(plist, errHtml), null);
     } else html = wrap(`
-      <div class="head"><div class="t"><span class="sec">${esc(circuitName(hass, circuit))}</span><b>${esc(title)}</b></div>${picker}${this._allValves().length > 1 ? `<button type="button" class="round" data-a="copyOpen" aria-label="Kopírovat na jiné hlavice">${icon('contentCopy')}</button>` : ''}</div>
+      <div class="head"><div class="t"><span class="sec">${esc(circuitName(hass, circuit))}</span><b>${esc(title)}</b></div>${picker}<button type="button" class="round" data-a="cog" aria-label="Nastavení rozvrhů okruhu">${icon('cogOutline')}</button>${this._allValves().length > 1 ? `<button type="button" class="round" data-a="copyOpen" aria-label="Kopírovat na jiné hlavice">${icon('contentCopy')}</button>` : ''}</div>
       ${errHtml}
       <div class="now${ns.muted || ns.tone == null ? ' muted' : ''}" data-kind="${ns.kind}">
         <span class="ic${toneCss ? ' tone' : ''}">${icon(ns.icon)}</span>
@@ -1367,8 +1772,8 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
         ${ns.btn ? `<button type="button" class="btn" data-a="sync">${esc(ns.btn)}</button>` : ''}
         <span class="big">${esc(ns.temp)}${ns.unit ? `<small>${ns.unit}</small>` : ''}</span>
       </div>
-      <div class="progs"><span class="label">Program</span><div class="chips">${list.map((p) =>
-        `<button type="button" class="chip" data-a="prog" data-id="${esc(p.id)}" aria-pressed="${p.id === prog}">${p.id === running ? '<span class="dot" title="Běží"></span>' : ''}${esc(p.name)}</button>`).join('')}</div></div>
+      <div class="progs"><div class="lrow"><span class="label">Program</span>${alt ? `<span class="wbadge">${icon('calendarWeek', 14)}${WEEK_LABEL[parity]} týden (${isoWeek(now)}.)</span>` : ''}</div><div class="chips">${list.map((p) =>
+        `<button type="button" class="chip" data-a="prog" data-id="${esc(p.id)}" aria-pressed="${p.id === prog}">${p.id === running ? '<span class="dot" title="Běží"></span>' : ''}${esc(p.name)}</button>`).join('')}<button type="button" class="chip add" data-a="addprog" aria-label="Nový program">${icon('plus', 18)}Program</button></div></div>
       ${main}
     `, toneCss, ns.muted ? ' muted-bars' : '');
     if (html === this._html) { this._dirty = false; return; }
@@ -1412,6 +1817,11 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     const pos = (m) => `calc(5px + (100% - 10px) * ${(m / DAY_END).toFixed(4)})`;
     const handles = sl.filter((x) => x.start > 0).map((x) => `<span class="handle" style="left:${pos(x.start)}"></span>`).join('');
     const hlabels = sl.filter((x) => x.start > 0).map((x) => `<span style="left:${pos(x.start)}">${Math.floor(x.start / 60)}:${pad(x.start % 60)}</span>`).join('');
+    // Opakování: tabs while the alternation is on; an existing week tag stays visible (and kept) when it is off
+    const repeatHtml = this._alternates()
+      ? `<div class="col"><span class="label">Opakování</span><div class="tabs">${[['all', 'Každý týden'], ['odd', 'Lichý'], ['even', 'Sudý']].map(([k, n]) =>
+        `<button type="button" class="tab" data-a="wk" data-k="${k}" aria-pressed="${(ed.week ?? 'all') === k}">${n}</button>`).join('')}</div></div>`
+      : ed.week ? `<div class="col"><span class="label">Opakování</span><span class="repro">${WEEK_LABEL[ed.week]} týden · střídání je vypnuté</span></div>` : '';
     const daysHtml = DAYS.map((d) => `<button type="button" class="day" data-a="day" data-k="${d}" aria-pressed="${ed.days.includes(d)}">${DAY_LABELS[d]}</button>`).join('');
     return `<div class="head">
         <button type="button" class="round" data-a="back" data-k="" aria-label="Zpět" ${busy ? 'disabled' : ''}>${icon('chevronLeft')}</button>
@@ -1420,11 +1830,13 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
         <button type="button" class="round" data-a="del" data-k="" aria-label="Smazat rozvrh" ${busy ? 'disabled' : ''}>${icon('deleteOutline')}</button>` : ''}
       </div>
       ${noCopy ? `<span class="sec" role="status">${esc(noCopy)}</span>` : ''}
-      ${ed.confirm ? `<div class="confirm" role="alertdialog" aria-label="Smazat rozvrh"><span>Smazat rozvrh ${esc(daysLabel(ed.existing?.days ?? ed.days))}?</span>
+      ${ed.confirm ? `<div class="confirm" role="alertdialog" aria-label="Smazat rozvrh"><span>Smazat rozvrh ${esc(ed.existing ? schedName(ed.existing) : daysLabel(ed.days))}?</span>
         <button type="button" class="btn small" data-a="delno" data-k="">Zrušit</button><button type="button" class="btn small danger" data-a="delok" data-k="" ${busy ? 'disabled' : ''}>Smazat</button></div>` : ''}
       ${errHtml}
-      ${ed.stale ? '<div class="err stale" role="alert"><span>Rozvrh se mezitím změnil</span><button type="button" class="btn small" data-a="reload" data-k="">Načíst znovu</button></div>' : ''}
-      <div class="col"><span class="label">Dny</span><div class="days">${daysHtml}</div></div>
+      ${ed.stale ? `<div class="err stale" role="alert"><span>Rozvrh${ed.existing?.week ? ` ${esc(schedName(ed.existing))}` : ''} se mezitím změnil</span><button type="button" class="btn small" data-a="reload" data-k="">Načíst znovu</button></div>` : ''}
+      <div class="col"><div class="lrow"><span class="label">Dny</span><div class="presets">${[['workday', 'Pracovní dny'], ['weekend', 'Víkend'], ['daily', 'Každý den']].map(([k, n]) =>
+        `<button type="button" class="preset" data-a="preset" data-k="${k}">${n}</button>`).join('')}</div></div><div class="days">${daysHtml}</div></div>
+      ${repeatHtml}
       <div class="col"><span class="label">Průběh dne</span><div class="edbar">${segs}${handles}</div><div class="hlabels">${hlabels}</div></div>
       <div class="panel">
         <div class="l"><span class="label">Úsek ${fmtTime(cur.start)}–${fmtTime(cur.end)}</span>
