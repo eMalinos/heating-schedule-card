@@ -795,3 +795,20 @@ test('slugify / checkProgram: id from the name, reserved and used names, per-fie
   assert.equal(checkProgram('Dovolená', list, 'vacation').error, '');
   assert.equal(ymd(at(2026, 1, 5)), '2026-01-05');
 });
+
+test('planCopy never plans an add or an edit without days (Po lichý + Po sudý over an every-week Po–Pá)', () => {
+  const W = ['mon', 'tue', 'wed', 'thu', 'fri'], T = 'climate.b';
+  const mk = (id, days, week, valve) => parseSchedule({ ...item(THREE, { schedule_id: id, weekdays: days, tags: ['program:auto', ...(week ? [`week:${week}`] : [])] }),
+    timeslots: item(THREE).timeslots.map((t) => ({ ...t, actions: [{ ...t.actions[0], entity_id: valve }] })) });
+  const r = planCopy({ source: V, mode: 'one', scheduleIds: ['o', 'e'], targets: [T], conflict: 'replace',
+    schedules: [mk('o', ['mon'], 'odd', V), mk('e', ['mon'], 'even', V), mk('t', W, null, T)] });
+  assert.deepEqual(r.add.map((m) => [m.week, m.days.join()]), [['odd', 'mon'], ['even', 'mon']]);
+  assert.deepEqual(r.edit.map((m) => [m.id, m.week, m.days.join()]), [['t', null, 'tue,wed,thu,fri']]);
+  assert.deepEqual(r.remove, []);
+  for (const m of [...r.add, ...r.edit]) assert.ok(m.days.length, 'days');
+  // the target's only weekday taken by both parities: it is removed, not edited to nothing
+  const r2 = planCopy({ source: V, mode: 'one', scheduleIds: ['o', 'e'], targets: [T], conflict: 'replace',
+    schedules: [mk('o', ['mon'], 'odd', V), mk('e', ['mon'], 'even', V), mk('t', ['mon'], null, T)] });
+  assert.deepEqual(r2.add.map((m) => [m.week, m.days.join()]), [['odd', 'mon'], ['even', 'mon']]);
+  assert.deepEqual([r2.edit, r2.remove], [[], ['t']]);
+});

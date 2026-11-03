@@ -712,13 +712,18 @@
     const HP = `sensor.heating_programs_${CID}`, ALT = `input_boolean.heating_week_alternation_${CID}`, HOL = `input_select.heating_holidays_${CID}`, CAL = `input_text.heating_holiday_calendar_${CID}`;
     const progAttr = hass.states['sensor.heating_program_heating_circuit_1'].attributes;
     // a fake HA: services change the states the way the helpers and the program script do
-    const mkHA = (list, extraStates = {}) => {
-      const A = { items: list, log: [], svc: [], states: {
+    const HPR = `sensor.heating_program_${CID}`;
+    const progSensors = (list) => ({
+      [HP]: { state: String(list.length), attributes: { programs: list } },
+      [HPR]: { state: 'auto', attributes: { programs: ['auto', ...list.map((p) => p.id)], program_names: { auto: 'Výchozí', ...Object.fromEntries(list.map((p) => [p.id, p.name])) } } },
+    });
+    const mkHA = (list, extraStates = {}, progList = [{ id: 'odd', name: 'Lichý týden' }, { id: 'vacation', name: 'Dovolená' }]) => {
+      const A = { items: list, log: [], svc: [], failRemove: 0, removes: 0, states: {
         ...hass.states, [K]: { state: 'heat', attributes: { friendly_name: 'Kuchyň', temperature: 21 } },
         [ALT]: { state: 'on', attributes: {} }, [HOL]: { state: 'cz', attributes: {} }, [CAL]: { state: '', attributes: {} },
-        [HP]: { state: '2', attributes: { programs: [{ id: 'odd', name: 'Lichý týden' }, { id: 'vacation', name: 'Dovolená' }] } },
+        ...progSensors(progList),
         ...extraStates,
-      }, failScript: false };
+      }, failScript: false, noScript: false };
       A.hass = {
         states: A.states, themes: {},
         callWS: async (m) => (m.type === 'call_service' ? { response: { 'calendar.cz': { events: [{ start: '2026-12-24', summary: 'Štědrý den' }] } } } : A.items),
@@ -726,14 +731,17 @@
           A.log.push(path.split('/')[1] + (body.schedule_id ? ':' + body.schedule_id : ''));
           if (path === 'scheduler/add') A.items = [...A.items, { ...mkItem('n' + A.items.length + A.log.length, body.weekdays, body.tags), timeslots: body.timeslots }];
           else if (path === 'scheduler/edit') A.items = A.items.map((x) => (x.schedule_id === body.schedule_id ? { ...x, weekdays: body.weekdays, tags: body.tags, timeslots: body.timeslots } : x));
-          else if (path === 'scheduler/remove') A.items = A.items.filter((x) => x.schedule_id !== body.schedule_id);
+          else if (path === 'scheduler/remove') {
+            if (A.failRemove && ++A.removes === A.failRemove) throw new Error('remove failed');
+            A.items = A.items.filter((x) => x.schedule_id !== body.schedule_id);
+          }
         },
         callService: async (domain, service, data) => {
           A.svc.push({ domain, service, data });
           if (domain === 'script') {
             A.log.push('script');
             if (A.failScript) throw new Error('script failed');
-            A.states[HP] = { state: String(data.programs.length), attributes: { programs: data.programs } };
+            if (!A.noScript) Object.assign(A.states, progSensors(data.programs));
           } else if (domain === 'input_boolean') A.states[ALT] = { state: A.states[ALT].state === 'on' ? 'off' : 'on', attributes: {} };
           else if (domain === 'input_select') A.states[HOL] = { state: data.option, attributes: {} };
           else if (domain === 'input_text') A.states[CAL] = { state: data.value, attributes: {} };
@@ -775,7 +783,7 @@
     r.v2EdTabs = [...sr2.querySelectorAll('[data-a="wk"]')].map((x) => x.textContent).join() === 'Každý týden,Lichý,Sudý' && sr2.querySelector('[data-a="wk"][aria-pressed="true"]').dataset.k === 'even';
     click(cw, '[data-a="preset"][data-k="weekend"]');
     r.v2Preset = sr2.querySelectorAll('.day[aria-pressed="true"]').length === 2 && sr2.querySelector('.day[data-k="sat"]').getAttribute('aria-pressed') === 'true';
-    click(cw, '[data-a="preset"][data-k="all"]');
+    click(cw, '[data-a="preset"][data-k="daily"]');
     r.v2PresetAll = sr2.querySelectorAll('.day[aria-pressed="true"]').length === 7;
     click(cw, '[data-a="preset"][data-k="workday"]');
     click(cw, '[data-a="wk"][data-k="odd"]');
@@ -808,6 +816,37 @@
     r.v2EdOffKept = A.items[0].tags.includes('week:even') && A.items[0].weekdays.includes('sat');
     click(cw, '[data-a="add"]');
     r.v2NewOff = !cw.shadowRoot.querySelector('.repro') && !cw.shadowRoot.querySelector('[data-a="wk"]');
+    cw.remove();
+
+    // default days of a new schedule follow the chosen week until the days are touched by hand
+    A = mkHA([mkItem('wo', WK, ['program:auto', 'week:odd'], 18)]);
+    cw = await mkCard(A.hass, cfgK);
+    click(cw, '[data-a="add"]');
+    const dayz = () => [...cw.shadowRoot.querySelectorAll('.day[aria-pressed="true"]')].map((b) => b.dataset.k).join();
+    const d0 = dayz();
+    click(cw, '[data-a="wk"][data-k="even"]');
+    const d1 = dayz();
+    click(cw, '[data-a="wk"][data-k="odd"]');
+    const d2 = dayz();
+    click(cw, '[data-a="day"][data-k="sat"]');
+    click(cw, '[data-a="wk"][data-k="even"]');
+    r.v2FreeDays = d0 === 'sat,sun' && d1 === 'mon,tue,wed,thu,fri,sat,sun' && d2 === 'sat,sun' && dayz() === 'sun';
+    cw.remove();
+    // the week is named wherever a schedule is: copy rows, the delete confirmation, the stale notice
+    A = mkHA([mkItem('wo', WK, ['program:auto', 'week:odd'], 18), mkItem('we', WK, ['program:auto', 'week:even'], 22), mkItem('wd', WE, ['program:auto'], 20)]);
+    cw = await mkCard(A.hass, cfgK);
+    click(cw, '[data-a="copyOpen"]');
+    click(cw, '[data-a="cp-mode"][data-k="one"]');
+    r.v2CopyNames = [...cw.shadowRoot.querySelectorAll('.tile[data-a="cp-row"] b')].map((b) => b.textContent).join('|') === 'Výchozí · Po–Pá · lichý|Výchozí · Po–Pá · sudý|Výchozí · So–Ne';
+    click(cw, '[data-a="cp-back"]');
+    click(cw, '.row [data-a="open"]');
+    click(cw, '[data-a="del"]');
+    r.v2DelConfirmWeek = text(cw, '.confirm span') === 'Smazat rozvrh Po–Pá · lichý?';
+    click(cw, '[data-a="delno"]');
+    A.items = A.items.map((x) => (x.schedule_id === 'wo' ? { ...x, weekdays: [...WK, 'sat'] } : x));
+    click(cw, '[data-a="save"]');
+    await tick(200);
+    r.v2StaleWeek = text(cw, '.stale span') === 'Rozvrh Po–Pá · lichý se mezitím změnil';
     cw.remove();
 
     // settings: the alternation switch, holiday tabs, the calendar picker, the next holidays
@@ -855,7 +894,7 @@
 
     // programs view: validation, add, rename, delete with its schedules
     A = mkHA([mkItem('a1', DAYS7, ['program:auto'], 20), mkItem('c1', WK, ['program:chata'], 18), mkItem('c2', WE, ['program:chata'], 19), mkItem('x1', DAYS7, ['program:vacation'], 16, BD)],
-      { [HP]: { state: '3', attributes: { programs: [{ id: 'odd', name: 'Lichý týden' }, { id: 'vacation', name: 'Dovolená' }, { id: 'chata', name: 'Chata' }] } } });
+      {}, [{ id: 'odd', name: 'Lichý týden', note: 'kept' }, { id: 'vacation', name: 'Dovolená' }, { id: 'chata', name: 'Chata' }]);
     cw = await mkCard(A.hass, cfgK);
     click(cw, '.chip.add');
     const sr4 = cw.shadowRoot;
@@ -874,6 +913,7 @@
     await tick(400);
     r.v2Add = A.svc.length === 1 && A.svc[0].domain === 'script' && A.svc[0].service === `heating_programs_set_${CID}`
       && JSON.stringify(A.svc[0].data.programs.at(-1)) === '{"id":"hytta_u_lesa","name":"Hytta u lesa"}' && A.svc[0].data.programs.length === 4
+      && A.svc[0].data.programs[0].note === 'kept' /* unknown per-program fields are kept */
       && [...cw.shadowRoot.querySelectorAll('.prow b')].map((x) => x.textContent).includes('Hytta u lesa') && cw.shadowRoot.querySelector('#newprog').value === '';
     // rename: the id stays
     A.svc.length = 0;
@@ -883,8 +923,30 @@
     setVal(cw, '[data-a="pg-rtext"]', 'Dovolená 2');
     click(cw, '[data-a="pg-rok"]');
     await tick(400);
+    r.v2RenameKeeps = A.svc[0]?.data.programs.find((p) => p.id === 'vacation').name === 'Dovolená 2' && A.svc[0].data.programs[0].note === 'kept';
     r.v2Rename = A.svc.length === 1 && A.svc[0].data.programs.map((p) => p.id + ':' + p.name).join() === 'odd:Lichý týden,vacation:Dovolená 2,chata:Chata,hytta_u_lesa:Hytta u lesa';
-    // delete asks first and names the schedules; the schedules go first, then the list entry
+    // Enter in the programs view: only the text inputs (a delete button keeps its native click and never renames)
+    A.svc.length = 0; A.log.length = 0;
+    click(cw, '[data-a="pg-ren"][data-k="odd"]');
+    setVal(cw, '[data-a="pg-rtext"]', 'Sudý týden');
+    cw.shadowRoot.querySelector('[data-a="pg-rtext"]').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await tick(400);
+    r.v2EnterRename = A.svc.length === 1 && A.svc[0].data.programs.find((p) => p.id === 'odd').name === 'Sudý týden';
+    A.svc.length = 0; A.log.length = 0;
+    click(cw, '[data-a="pg-ren"][data-k="odd"]');
+    setVal(cw, '[data-a="pg-rtext"]', 'Zase jiný');
+    click(cw, '[data-a="pg-rcancel"]');
+    r.v2CancelClears = cw._pg.rtext === '' && cw._pg.renaming === null;
+    click(cw, '[data-a="pg-ren"][data-k="odd"]');
+    r.v2RenameFresh = cw.shadowRoot.querySelector('[data-a="pg-rtext"]').value === 'Sudý týden';
+    click(cw, '[data-a="pg-rcancel"]');
+    click(cw, '[data-a="pg-del"][data-k="chata"]');
+    cw.shadowRoot.querySelector('[data-a="pg-delok"]').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    cw.shadowRoot.querySelector('[data-a="pg-text"], #newprog').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); // empty name: nothing
+    await tick(300);
+    r.v2EnterButton = A.svc.length === 0 && A.log.length === 0 && !!cw.shadowRoot.querySelector('.confirm');
+    click(cw, '[data-a="pg-delno"]');
+    // delete asks first and names the schedules; the list entry goes first, then the schedules
     A.svc.length = 0; A.log.length = 0;
     click(cw, '[data-a="pg-del"][data-k="chata"]');
     r.v2DelAsk = text(cw, '.confirm span') === 'Smazat program Chata a jeho 2 rozvrhy?' && A.log.length === 0;
@@ -892,21 +954,31 @@
     r.v2DelNo = !cw.shadowRoot.querySelector('.confirm') && A.log.length === 0;
     click(cw, '[data-a="pg-del"][data-k="chata"]');
     click(cw, '[data-a="pg-delok"]');
-    await tick(500);
-    r.v2Del = A.log.join() === 'remove:c1,remove:c2,script' && !A.items.some((x) => x.tags.includes('program:chata')) && A.items.length === 2
+    await tick(600);
+    r.v2Del = A.log.join() === 'script,remove:c1,remove:c2' && !A.items.some((x) => x.tags.includes('program:chata')) && A.items.length === 2
       && !A.svc[0].data.programs.some((p) => p.id === 'chata') && ![...cw.shadowRoot.querySelectorAll('.prow b')].some((x) => x.textContent === 'Chata');
-    // a failing list write puts the removed schedules back (own writes only), shows the error and keeps the list
+    // a failing removal puts the removed schedules and the old list back
     A.items = [...A.items, mkItem('c3', WK, ['program:hytta_u_lesa'], 18), mkItem('c4', WE, ['program:hytta_u_lesa'], 19)];
     cw.hass = { ...A.hass };
     await cw._load();
-    A.failScript = true; A.log.length = 0;
+    A.failRemove = 2; A.removes = 0; A.log.length = 0; A.svc.length = 0;
     click(cw, '[data-a="pg-del"][data-k="hytta_u_lesa"]');
     click(cw, '[data-a="pg-delok"]');
-    await tick(500);
-    r.v2DelRollback = A.log.join() === 'remove:c3,remove:c4,script,add,add' && A.items.filter((x) => x.tags.includes('program:hytta_u_lesa')).length === 2
-      && cw.shadowRoot.textContent.includes('Chyba: script failed') && [...cw.shadowRoot.querySelectorAll('.prow b')].map((x) => x.textContent).includes('Hytta u lesa');
+    await tick(800);
+    r.v2DelRollback = A.log.join() === 'script,remove:c3,remove:c4,add,script' && A.items.filter((x) => x.tags.includes('program:hytta_u_lesa')).length === 2
+      && cw.shadowRoot.textContent.includes('Chyba: remove failed') && [...cw.shadowRoot.querySelectorAll('.prow b')].map((x) => x.textContent).includes('Hytta u lesa')
+      && A.svc.at(-1).data.programs.some((p) => p.id === 'hytta_u_lesa');
+    A.failRemove = 0;
+    // the running program is not deleted
+    A.states[HPR] = { ...A.states[HPR], state: 'vacation' };
+    cw.hass = { ...A.hass };
+    A.log.length = 0;
+    click(cw, '[data-a="pg-del"][data-k="vacation"]');
+    r.v2DelRunning = text(cw, '.confirm span') === 'Program právě běží — nejdřív přepněte okruh na jiný program' && !cw.shadowRoot.querySelector('[data-a="pg-delok"]') && A.log.length === 0;
+    click(cw, '[data-a="pg-delno"]');
+    A.states[HPR] = { ...A.states[HPR], state: 'auto' };
+    cw.hass = { ...A.hass };
     // a program with a read-only schedule is not deleted from the card
-    A.failScript = false;
     A.items = [...A.items, { ...mkItem('ro1', WK, ['program:vacation']), repeat_type: 'single' }];
     await cw._load();
     A.log.length = 0;
@@ -921,15 +993,35 @@
     await tick(300);
     r.v2DelStale = A.log.length === 0 && cw.shadowRoot.textContent.includes('Rozvrhy se mezitím změnily');
     cw.remove();
+    // a slow read-back is looked at once more after 5 s: it shows up late, no error, the schedules are removed
+    A = mkHA([mkItem('s1', WK, ['program:vacation'], 18)], {}, [{ id: 'vacation', name: 'Dovolená' }]);
+    A.hass.callService = async (d, sv, data) => { A.svc.push({ d, sv, data }); A.log.push('script'); setTimeout(() => Object.assign(A.states, progSensors(data.programs)), 7000); };
+    cw = await mkCard(A.hass, cfgK);
+    click(cw, '.chip.add');
+    click(cw, '[data-a="pg-del"][data-k="vacation"]');
+    click(cw, '[data-a="pg-delok"]');
+    await tick(13000);
+    r.v2SlowReadBack = A.log.join() === 'script,remove:s1' && !cw.shadowRoot.textContent.includes('Chyba');
+    cw.remove();
+    // the read-back never shows up: the advice to check, and the schedules stay (nothing removed, nothing re-added)
+    A = mkHA([mkItem('s1', WK, ['program:vacation'], 18)], {}, [{ id: 'vacation', name: 'Dovolená' }]);
+    A.noScript = true;
+    cw = await mkCard(A.hass, cfgK);
+    click(cw, '.chip.add');
+    click(cw, '[data-a="pg-del"][data-k="vacation"]');
+    click(cw, '[data-a="pg-delok"]');
+    await tick(14000);
+    r.v2DelNoReadBack = A.log.join() === 'script' && A.items.length === 1 && cw.shadowRoot.textContent.includes('Chyba: Seznam se možná neuložil — zkontrolujte');
+    cw.remove();
     // the list write never shows up in the states: an error, nothing else
-    A = mkHA([], { [HP]: { state: '0', attributes: { programs: [] } } });
+    A = mkHA([], {}, []);
     A.hass.callService = async (d, s, data) => { A.svc.push({ d, s, data }); };
     cw = await mkCard(A.hass, cfgK);
     click(cw, '.chip.add');
     setVal(cw, '#newprog', 'Chata');
     click(cw, '[data-a="pg-add"]');
-    await tick(6500);
-    r.v2NoReadBack = cw.shadowRoot.textContent.includes('Chyba: Seznam programů se neuložil');
+    await tick(14000);
+    r.v2NoReadBack = cw.shadowRoot.textContent.includes('Chyba: Seznam se možná neuložil — zkontrolujte');
     cw.remove();
 
     r.noErrors = errors.length === 0;
