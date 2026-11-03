@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import {
   normalizeConfig, circuitName, parseSchedule, toPayload, effective, slotAt, groupByProgram, daysLabel, tempColor, fmtTemp, fmtTime,
   loadSchedules, saveSchedule, removeSchedule, nowState, DASH, isFallbackProgram, barSegments, slotsSummary,
+  normalizeSlots, splitSlot, removeSlot, moveBoundary, setTemp, daysConflict,
 } from '../dist/heating-schedule-card.js';
 
 process.env.TZ = 'Europe/Prague'; // the DST test needs a zone with a spring-forward day
@@ -374,4 +375,74 @@ test('fmtTemp(null) is the same dash the tile uses for "no temperature"', () => 
   assert.equal(fmtTemp(null), DASH);
   const t = nowState({ states: states({ [`input_select.heating_mode_${C}`]: { state: 'off' } }), circuit: C, valve: V, schedules: [], program: 'auto', now: at(2026, 11, 2, 12), nValves: 1 });
   assert.deepEqual([t.temp, t.unit], [DASH, '']);
+});
+
+// ---------- editor: pure logic ----------
+const S3 = [{ start: 0, end: 360, temp: 18 }, { start: 360, end: 1200, temp: 21 }, { start: 1200, end: 1440, temp: 19 }];
+const cover = (s) => s[0].start === 0 && s.at(-1).end === 1440 && s.every((x, i) => x.start < x.end && (i === 0 || x.start === s[i - 1].end));
+const se = (s) => s.map((x) => [x.start, x.end]);
+
+test('normalizeSlots: a late first slot gets a leading slot with the last temperature', () => {
+  assert.deepEqual(normalizeSlots([{ start: 360, end: 1200, temp: 21 }, { start: 1200, end: 1440, temp: 19 }]).slice(0, 2),
+    [{ start: 0, end: 360, temp: 19 }, { start: 360, end: 1200, temp: 21 }]);
+  assert.deepEqual(normalizeSlots(S3), S3);
+});
+
+test('splitSlot: halves at the nearest step, too short stays', () => {
+  const r = splitSlot(S3, 1, 15); // 06:00-20:00 -> mid 13:00
+  assert.deepEqual(r.slice(1, 3), [{ start: 360, end: 780, temp: 21 }, { start: 780, end: 1200, temp: 21 }]);
+  assert.ok(cover(r));
+  assert.deepEqual(se(splitSlot([{ start: 0, end: 1440, temp: 20 }], 0, 15)), [[0, 720], [720, 1440]]);
+  assert.deepEqual(se(splitSlot([{ start: 0, end: 50, temp: 20 }, { start: 50, end: 1440, temp: 20 }], 0, 15)).slice(0, 2), [[0, 30], [30, 50]]);
+  const tiny = [{ start: 0, end: 20, temp: 20 }, { start: 20, end: 1440, temp: 20 }];
+  assert.equal(splitSlot(tiny, 0, 15), tiny);
+});
+
+test('removeSlot: merges into the previous, the first into the next, the only one stays', () => {
+  assert.deepEqual(removeSlot(S3, 1), [{ start: 0, end: 1200, temp: 18 }, S3[2]]);
+  assert.deepEqual(removeSlot(S3, 0), [{ start: 0, end: 1200, temp: 21 }, S3[2]]);
+  assert.deepEqual(removeSlot(S3, 2), [S3[0], { start: 360, end: 1440, temp: 21 }]);
+  const one = [{ start: 0, end: 1440, temp: 20 }];
+  assert.equal(removeSlot(one, 0), one);
+  for (let i = 0; i < 3; i++) assert.ok(cover(removeSlot(S3, i)));
+});
+
+test('moveBoundary: clamped, min length = step, coverage kept', () => {
+  assert.deepEqual(se(moveBoundary(S3, 1, 15)).slice(0, 2), [[0, 375], [375, 1200]]);
+  assert.deepEqual(se(moveBoundary(S3, 1, -15)).slice(0, 2), [[0, 345], [345, 1200]]);
+  assert.deepEqual(se(moveBoundary(S3, 1, 5000, 15)), [[0, 1185], [1185, 1200], [1200, 1440]]);
+  assert.deepEqual(se(moveBoundary(S3, 1, -5000, 15)), [[0, 15], [15, 1200], [1200, 1440]]);
+  assert.equal(moveBoundary(S3, 0, 15), S3); // 00:00 is fixed
+  assert.equal(moveBoundary(S3, 3, 15), S3); // 24:00 is fixed
+  const at = [{ start: 0, end: 15, temp: 1 }, { start: 15, end: 1440, temp: 2 }];
+  assert.deepEqual(se(moveBoundary(at, 1, -15)), [[0, 15], [15, 1440]]); // already min length
+  for (const d of [-60, -15, 15, 60, 900]) assert.ok(cover(moveBoundary(S3, 2, d)));
+});
+
+test('setTemp: 5-30 °C in 0.5 steps, immutable', () => {
+  assert.equal(setTemp(S3, 1, 21.6)[1].temp, 21.5);
+  assert.equal(setTemp(S3, 1, 99)[1].temp, 30);
+  assert.equal(setTemp(S3, 1, -3)[1].temp, 5);
+  assert.equal(S3[1].temp, 21);
+  assert.equal(setTemp(S3, 9, 20), S3);
+});
+
+test('daysConflict: weekdays another schedule of the same valve and program uses', () => {
+  const list = [sched(THREE, { schedule_id: 'a', weekdays: ['mon', 'tue'] }), sched(THREE, { schedule_id: 'b', weekdays: ['sat'], tags: ['program:odd'] }),
+    sched(THREE, { schedule_id: 'c', weekdays: ['wed'], tags: ['paused'] })];
+  assert.deepEqual(daysConflict(list, V, 'auto', ['tue', 'wed', 'thu']), ['tue', 'wed']); // paused counts too
+  assert.deepEqual(daysConflict(list, V, 'auto', ['mon', 'tue'], 'a'), []); // the edited one is excluded
+  assert.deepEqual(daysConflict(list, V, 'odd', ['sat', 'sun']), ['sat']);
+  assert.deepEqual(daysConflict(list, 'climate.other', 'auto', ['mon']), []);
+});
+
+test('toPayload after editing: starts only, last stop 23:59, name and dates kept', () => {
+  const ex = parseSchedule(item(THREE, { schedule_id: 'k', name: 'mine', start_date: '2026-01-01', tags: ['kitchen_valve', 'program:auto'] }));
+  const body = toPayload({ id: 'k', valve: V, program: 'auto', days: ['sun', 'mon'], slots: splitSlot(ex.slots, 1), paused: false }, ex);
+  assert.deepEqual(body.timeslots.map((t) => [t.start, t.stop]), [['00:00:00', '06:00:00'], ['06:00:00', '13:00:00'], ['13:00:00', '20:00:00'], ['20:00:00', '23:59:00']]);
+  assert.deepEqual(body.weekdays, ['mon', 'sun']);
+  assert.equal(body.name, 'mine');
+  assert.equal(body.start_date, '2026-01-01');
+  assert.deepEqual(body.tags, ['kitchen_valve', 'program:auto']);
+  assert.equal(body.schedule_id, 'k');
 });

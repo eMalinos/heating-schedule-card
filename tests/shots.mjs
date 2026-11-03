@@ -1,4 +1,4 @@
-// Screenshot pages for tests/dom.html?shot=week|fallback|states (&dark=1, &w=<px>): the canvas data (Main2.dc.html) in a
+// Screenshot pages for tests/dom.html?shot=week|fallback|states|editor|picker (&dark=1, &w=<px>): the canvas data (Main2.dc.html) in a
 // fake hass with a fixed clock (Monday 14:20), to compare the card with the artboards by eye.
 const q = new URLSearchParams(location.search);
 const shot = q.get('shot'), dark = q.has('dark'), width = Number(q.get('w')) || 580;
@@ -48,7 +48,7 @@ const STATES = {
   'nastavuji': s(`sensor.heating_applying_${C}`, 'applying', { left: 3 }),
 };
 
-const mk = async (label, patch, pick) => {
+const mk = async (label, patch, pick, cfg = { valve: V }) => {
   const wrap = document.createElement('div');
   wrap.style.cssText = `width:${width}px;margin:0 0 16px;border-radius:28px;overflow:hidden;box-shadow:0 8px 30px rgba(0,0,0,.15)`;
   document.body.append(wrap);
@@ -59,7 +59,7 @@ const mk = async (label, patch, pick) => {
     connection: { subscribeMessage: async () => () => {} },
   };
   const card = document.createElement('heating-schedule-card');
-  card.setConfig({ valve: V, circuits: [{ id: C, name: 'Přízemí', valves: [V, 'climate.kitchen_valve'] }] });
+  card.setConfig({ ...cfg, circuits: [{ id: C, name: 'Přízemí', valves: [V, 'climate.kitchen_valve'] }] });
   card.hass = hass;
   wrap.append(card);
   await new Promise((r) => setTimeout(r, 150));
@@ -71,5 +71,14 @@ document.body.style.cssText = `margin:0;padding:24px;background:${dark ? '#10131
   + (dark ? '--ha-card-background:#181c22;--secondary-background-color:#21262e;--divider-color:#262c35;--primary-color:#86a9d1;--primary-text-color:#e9edf2;--secondary-text-color:#949ca8' : '--ha-card-background:#fff;--secondary-background-color:#f0f2f5;--divider-color:#dfe3e8;--primary-color:#4f6b8c;--primary-text-color:#1c2128;--secondary-text-color:#666e79');
 if (shot === 'week') await mk('', {});
 else if (shot === 'fallback') await mk('', {}, 'odd');
-else if (shot === 'states') for (const [k, p] of Object.entries(STATES)) await mk(k, p);
+else if (shot === 'editor') { // Editor1: Výchozí, Po–Pá, the 16:00–22:00 slot selected
+  const c = await mk('', {});
+  c.shadowRoot.querySelector('.row [data-a="open"]').click();
+  c.shadowRoot.querySelector('[data-a="sel"][data-k="3"]').click();
+} else if (shot === 'picker') { // Picker1: general card (no `valve`), Obývák + Kuchyň picked
+  const c = await mk('', {}, null, {});
+  c._valve = V;
+  c.shadowRoot.querySelector('[data-a="add"]').click();
+  c.shadowRoot.querySelector('[data-a="pv"][data-k="climate.kitchen_valve"]').click();
+} else if (shot === 'states') for (const [k, p] of Object.entries(STATES)) await mk(k, p);
 document.title = `shot ${shot}`;
