@@ -38,26 +38,65 @@
   await tick(100);
 
   const r = {};
-  r.loaded = ws[0]?.type === 'scheduler' && ws.some((m) => m.type === 'scheduler_updated');
+  r.loaded = ws.some((m) => m.type === 'scheduler') && ws.some((m) => m.type === 'scheduler_updated');
   r.title = root.querySelector('h3').textContent.replace(/\s+/g, ' ') === 'Kuchyň · Přízemí';
   r.programs = [...root.querySelectorAll('.prog')].map((p) => p.textContent).join() === 'Výchozí,vacation';
   r.rows = root.querySelectorAll('.row').length === 2 && root.querySelector('.days').textContent === 'Po–Ne'
     && root.querySelector('.chip').textContent.replace(/\s/g, ' ') === '00:00 21 °C';
   r.editable = !root.textContent.includes('jen ke čtení');
 
-  // a created schedule: the list reloads once (debounced) and its switch is turned off
+  // created schedules: one of ours (switch entity not there yet) and a foreign one (valve not in the config)
   const n = ws.length;
-  items = [...fixture, { ...fixture[0], schedule_id: 'new1', entity_id: 'switch.schedule_new1', weekdays: ['mon'], tags: ['program:auto'] }];
+  const mine = { ...fixture[0], schedule_id: 'new1', entity_id: 'switch.schedule_new1', weekdays: ['mon'], tags: ['program:auto'] };
+  const foreign = { ...mine, schedule_id: 'for1', entity_id: 'switch.schedule_for1', timeslots: [{ ...mine.timeslots[0], actions: [{ ...mine.timeslots[0].actions[0], entity_id: 'climate.other' }] }] };
+  items = [...fixture, mine, foreign];
   onEvent({ event: 'scheduler_item_created', schedule_id: 'new1' });
+  onEvent({ event: 'scheduler_item_created', schedule_id: 'for1' });
   onEvent({ event: 'scheduler_item_updated', schedule_id: 'new1' });
   await tick(500);
   r.debounced = ws.length === n + 1;
-  r.turnedOff = JSON.stringify(services) === JSON.stringify([{ domain: 'switch', service: 'turn_off', data: { entity_id: 'switch.schedule_new1' } }]);
   r.newRow = root.querySelectorAll('.row').length === 3;
+  r.waitsForSwitch = services.length === 0;
 
+  // an unrelated state change does not rebuild the DOM
+  const cardEl = root.querySelector('ha-card');
+  const withSwitches = { ...hass, states: { ...hass.states, 'switch.schedule_new1': { state: 'on' }, 'switch.schedule_for1': { state: 'on' }, 'sensor.x': { state: '1' } } };
+  card.hass = withSwitches;
+  r.noRebuild = root.querySelector('ha-card') === cardEl;
+  r.noEarlyLoad = ws.length === n + 1;
+
+  // the next load turns off only ours, once; the foreign schedule is never touched
+  onEvent({ event: 'scheduler_item_updated', schedule_id: 'new1' });
+  await tick(500);
+  onEvent({ event: 'scheduler_item_updated', schedule_id: 'new1' });
+  await tick(500);
+  r.turnedOff = JSON.stringify(services) === JSON.stringify([{ domain: 'switch', service: 'turn_off', data: { entity_id: 'switch.schedule_new1' } }]);
+
+  // disconnect unsubscribes; reconnect re-subscribes and reloads
   card.remove();
   await tick();
   r.unsubscribed = unsubscribed === 1;
+  const m = ws.length;
+  document.getElementById('box').appendChild(card);
+  await tick(200);
+  r.reloaded = ws.slice(m).some((x) => x.type === 'scheduler');
+  r.resubscribed = ws.slice(m).some((x) => x.type === 'scheduler_updated');
+
+  // a rejected subscription shows an error line and is retried on the next hass update
+  let fail = true;
+  const hass2 = { ...withSwitches, connection: { subscribeMessage: async () => { if (fail) throw new Error('unknown command'); return () => {}; } } };
+  const card2 = document.createElement('heating-schedule-card');
+  card2.setConfig({ circuits: [{ id: 'c', valves: ['climate.kitchen_valve'] }] });
+  card2.hass = hass2;
+  document.getElementById('box').appendChild(card2);
+  await tick(100);
+  r.subError = card2.shadowRoot.textContent.includes('Chyba: unknown command');
+  fail = false;
+  card2.hass = { ...hass2 };
+  await tick(100);
+  r.subRetried = !card2.shadowRoot.textContent.includes('Chyba');
+  card2.remove();
+
 
   r.noErrors = errors.length === 0;
   const ok = Object.values(r).every(Boolean);

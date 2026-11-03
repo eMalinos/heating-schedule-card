@@ -6,6 +6,7 @@ import {
   loadSchedules, saveSchedule, removeSchedule,
 } from '../dist/heating-schedule-card.js';
 
+process.env.TZ = 'Europe/Prague'; // the DST test needs a zone with a spring-forward day
 // Real items copied from the dev HA ({type: 'scheduler'}).
 const FIXTURE = JSON.parse(readFileSync(new URL('./fixtures/schedules.json', import.meta.url)));
 const V = 'climate.kitchen_valve';
@@ -50,7 +51,7 @@ test('parseSchedule: real dev items are editable', () => {
   assert.ok(all.every((s) => s.editable), 'all editable');
   const [auto, vac] = all;
   assert.deepEqual({ ...auto, raw: null }, {
-    id: '848813', switch: 'switch.schedule_bench_kitchen_valve_auto', valve: V, program: 'auto',
+    id: '848813', switch: 'switch.schedule_bench_kitchen_valve_auto', valve: V, valves: [V], program: 'auto',
     days: ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'], slots: [{ start: 0, end: 1440, temp: 21 }], paused: false, editable: true, raw: null,
   });
   assert.equal(vac.program, 'vacation');
@@ -68,10 +69,17 @@ test('parseSchedule: legacy without program tag is auto; paused tag; weekday ali
 test('parseSchedule: not editable', () => {
   const bad = (s) => assert.equal(s.editable, false);
   bad(sched(THREE, { repeat_type: 'single' }));
-  bad(sched([['00:00:00', '06:00:00', 18], ['07:00:00', '00:00:00', 21]])); // gap
-  bad(sched([['01:00:00', '00:00:00', 18]])); // does not start at 00:00
-  bad(sched([['00:00:00', '12:00:00', 18]])); // does not end at 24:00
   bad(sched([['00:00:00', 'sunset+00:30', 18], ['sunset+00:30', '00:00:00', 21]])); // sun-relative
+  bad(sched(THREE, { weekdays: ['workday'] })); // never rewritten as explicit days
+  bad(sched(THREE, { weekdays: ['weekend'] }));
+  bad(sched([['00:00:00', '12:00:00', 18], ['06:00:00', '00:00:00', 21]])); // overlap
+  bad(sched([['06:00:00', '12:00:00', 18], ['06:00:00', '00:00:00', 21]])); // duplicate start
+  const noTemp = item(THREE);
+  noTemp.timeslots[1].actions[0].service_data = { target_temp_low: 19 };
+  bad(parseSchedule(noTemp));
+  const none = item(THREE);
+  none.timeslots[1].actions = [];
+  bad(parseSchedule(none));
   const cond = item(THREE);
   cond.timeslots[1].conditions = [{ entity_id: 'sensor.x', value: 1, match_type: 'is' }];
   bad(parseSchedule(cond));
@@ -98,7 +106,7 @@ test('toPayload: add shape matches scheduler-component ADD_SCHEDULE_SCHEMA', () 
     weekdays: ['mon', 'sat'],
     timeslots: [
       { start: '00:00:00', stop: '08:00:00', actions: [{ service: 'climate.set_temperature', entity_id: V, service_data: { temperature: 17 } }] },
-      { start: '08:00:00', stop: '00:00:00', actions: [{ service: 'climate.set_temperature', entity_id: V, service_data: { temperature: 21.5 } }] },
+      { start: '08:00:00', stop: '23:59:00', actions: [{ service: 'climate.set_temperature', entity_id: V, service_data: { temperature: 21.5 } }] },
     ],
     repeat_type: 'repeat', tags: ['program:vacation'], name: null,
   });
@@ -203,4 +211,64 @@ test('data access: WS list, add / edit / remove endpoints', async () => {
   assert.deepEqual(calls.slice(1).map((c) => [c[1], c[2]]), [['POST', 'scheduler/add'], ['POST', 'scheduler/edit'], ['POST', 'scheduler/remove']]);
   assert.equal(calls[2][3].schedule_id, '848813');
   assert.deepEqual(calls[3][3], { schedule_id: 'abc' });
+});
+
+test('parseSchedule: only starts count (old scheduler-card schedules are editable)', () => {
+  const one = sched([['06:00:00', '23:00:00', 21]]);
+  assert.equal(one.editable, true);
+  assert.deepEqual(one.slots, [{ start: 360, end: 1440, temp: 21 }]);
+  const un = sched([['18:00:00', '22:00:00', 20], ['06:00:00', '08:00:00', 21]]);
+  assert.equal(un.editable, true);
+  assert.deepEqual(un.slots, [{ start: 360, end: 1080, temp: 21 }, { start: 1080, end: 1440, temp: 20 }]);
+});
+
+test('null temperature: slot keeps null, read-only, nothing throws', () => {
+  const i = item(THREE);
+  i.timeslots[1].actions[0].service_data = { target_temp_low: 19, target_temp_high: 23 };
+  const s = parseSchedule(i);
+  assert.equal(s.slots[1].temp, null);
+  assert.equal(s.editable, false);
+  assert.equal(tempColor(null), '#9AA0A6');
+  assert.equal(fmtTemp(null), '–');
+  assert.equal(slotAt([s], V, 'auto', at(2026, 11, 2, 7)).temp, null);
+});
+
+test('slotAt: calendar days across the spring-forward date', () => {
+  // 2026-03-29 is 23 h long in Europe/Prague; Monday 03-30 00:30 must still see Sunday's evening slot
+  const sun = parseSchedule({ ...item([['00:00:00', '20:00:00', 18], ['20:00:00', '00:00:00', 17]]), weekdays: ['sun'] });
+  const mon = parseSchedule({ ...item([['06:00:00', '00:00:00', 21]]), weekdays: ['mon'] });
+  const r = slotAt([sun, mon], V, 'auto', at(2026, 3, 30, 0, 30));
+  assert.equal(r.temp, 17);
+  assert.equal(r.fromYesterday, true);
+  assert.deepEqual(slotAt([sun, mon], V, 'auto', at(2026, 3, 29, 22, 0)).next, { start: 360, temp: 21, tomorrow: true });
+});
+
+test('multi-valve schedule: read-only, counts for each of its valves', () => {
+  const i = item([['00:00:00', '00:00:00', 20]]);
+  i.timeslots[0].actions[0].entity_id = [V, 'climate.b'];
+  const s = parseSchedule(i);
+  assert.deepEqual(s.valves, [V, 'climate.b']);
+  assert.equal(s.valve, null);
+  assert.equal(s.editable, false);
+  for (const v of [V, 'climate.b']) {
+    assert.equal(effective([s], v, 'auto', 'mon').schedules.length, 1);
+    assert.equal(slotAt([s], v, 'auto', at(2026, 11, 2, 7)).temp, 20);
+    assert.equal(groupByProgram([s], v).get('auto').length, 1);
+  }
+  assert.equal(effective([s], 'climate.c', 'auto', 'mon').schedules.length, 0);
+});
+
+test('toPayload: keeps name and start / end date, only owned fields change', () => {
+  const ex = sched(THREE, { name: 'Moje', start_date: '2026-11-01', end_date: '2027-03-01', tags: ['program:auto'] });
+  const p = toPayload({ ...ex, days: ['mon'] }, ex);
+  assert.equal(p.name, 'Moje');
+  assert.equal(p.start_date, '2026-11-01');
+  assert.equal(p.end_date, '2027-03-01');
+  assert.deepEqual(p.weekdays, ['mon']);
+  assert.deepEqual(Object.keys(p).sort(), ['end_date', 'name', 'repeat_type', 'schedule_id', 'start_date', 'tags', 'timeslots', 'weekdays']);
+});
+
+test('toPayload: last stop 23:59, others = next start', () => {
+  const m = { valve: V, program: 'auto', days: ['mon'], slots: [{ start: 360, end: 1080, temp: 21 }, { start: 1080, end: 1440, temp: 20 }] };
+  assert.deepEqual(toPayload(m).timeslots.map((t) => [t.start, t.stop]), [['06:00:00', '18:00:00'], ['18:00:00', '23:59:00']]);
 });
