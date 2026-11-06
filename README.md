@@ -19,7 +19,9 @@ A Home Assistant card for the weekly heating schedules of climate valves, writte
 
 ## Installation
 
-Not in HACS. Copy [`dist/heating-schedule-card.js`](dist/heating-schedule-card.js) to `config/www/`, then add a dashboard resource:
+**HACS (custom repository):** HACS → ⋮ → Custom repositories → `https://github.com/eMalinos/heating-schedule-card`, type **Dashboard** → download *Heating Schedule Card* → reload the browser. HACS adds the resource itself.
+
+**Manual:** copy [`dist/heating-schedule-card.js`](dist/heating-schedule-card.js) to `config/www/`, then add a dashboard resource:
 
 Settings → Dashboards → ⋮ → Resources → Add resource → URL `/local/heating-schedule-card.js?v=0.2.1`, type **JavaScript module** → reload the browser. Change `?v=` after copying a new version.
 
