@@ -1,6 +1,6 @@
 // heating-schedule-card: weekly heating schedules of climate valves, stored by scheduler-component.
 // One plain ES module: no build step, no dependencies. Pure functions are exported for `node --test`.
-const VERSION = '0.2.2';
+const VERSION = '0.2.3';
 const isCal = (v) => typeof v === 'string' && v.startsWith('calendar.');
 const CZ_CALENDAR = 'calendar.czechia'; // the calendar the Holiday integration creates for Czechia
 
@@ -323,6 +323,13 @@ export function moveBoundary(slots, i, delta, step = 15) {
 }
 
 export const TEMP_MIN = 5, TEMP_MAX = 30;
+
+/** Dial point (dx, dy) from the centre -> temperature on the 270° arc of 15–25 °C (0.5 °C); the gap at the bottom snaps to the nearer end. */
+export function dialTemp(dx, dy) {
+  let rel = ((Math.atan2(dx, -dy) * 180 / Math.PI) - 225 + 720) % 360;
+  if (rel > 270) rel = rel > 315 ? 0 : 270;
+  return Math.round((15 + rel / 27) * 2) / 2;
+}
 
 /** Temperature of slot `i`, rounded to 0.5 and clamped to 5-30 °C. */
 export function setTemp(slots, i, t) {
@@ -726,7 +733,8 @@ const STYLE = `
   .edseg:first-of-type { border-top-left-radius: 14px; border-bottom-left-radius: 14px; }
   .edseg:last-of-type { border-top-right-radius: 14px; border-bottom-right-radius: 14px; }
   .edseg[aria-pressed="true"] { outline: 2.5px solid var(--c-text); outline-offset: 2px; z-index: 1; }
-  .handle { position: absolute; top: 50%; width: 10px; height: 34px; margin: -17px 0 0 -5px; box-sizing: border-box; border-radius: 999px; background: var(--c-raised); border: 1px solid var(--c-border); box-shadow: var(--c-raised-shadow); z-index: 2; pointer-events: none; }
+  .handle { position: absolute; top: 50%; width: 10px; height: 34px; margin: -17px 0 0 -5px; box-sizing: border-box; border-radius: 999px; background: var(--c-raised); border: 1px solid var(--c-border); box-shadow: var(--c-raised-shadow); z-index: 2; cursor: ew-resize; touch-action: none; }
+  .handle::before { content: ''; position: absolute; inset: -14px -12px; }
   .hlabels { position: relative; height: 16px; }
   .hlabels span { position: absolute; top: 0; transform: translateX(-50%); font-size: 11px; font-weight: 600; color: var(--c-text2); font-variant-numeric: tabular-nums; }
   .panel { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; padding: 14px; border-radius: 20px; border: 1px solid var(--c-border); background: linear-gradient(150deg, var(--c-card) 15%, color-mix(in srgb, var(--tone) 14%, var(--c-card)) 100%); }
@@ -740,7 +748,8 @@ const STYLE = `
   .step:disabled { opacity: .35; cursor: default; }
   .dial { position: relative; width: 188px; height: 188px; }
   .dial > div, .dial > span { position: absolute; }
-  .dial .ring { inset: 0; border-radius: 50%; }
+  .dial { cursor: pointer; touch-action: none; user-select: none; }
+  .dial svg { position: absolute; inset: 0; }
   .dial .face { left: 50%; top: 50%; width: 117px; height: 117px; margin: -58.5px 0 0 -58.5px; border-radius: 50%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; background: var(--c-card); box-shadow: 0 10px 26px rgba(40,55,80,.16), 0 0 0 1px var(--c-border); }
   .card.dark .dial .face { box-shadow: 0 10px 26px rgba(0,0,0,.6), 0 0 0 1px var(--c-border); }
   .dial .face b { font-size: 34px; font-weight: 700; letter-spacing: -1px; line-height: 1.05; }
@@ -801,6 +810,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     this._ed = null; // editor state while view is 'editor'
     this._pick = null; // valve picker state while view is 'picker'
     this.shadowRoot.addEventListener('click', (e) => this._click(e));
+    this.shadowRoot.addEventListener('pointerdown', (e) => this._drag(e));
     this.shadowRoot.addEventListener('change', (e) => this._change(e));
     this.shadowRoot.addEventListener('input', (e) => this._input(e));
     this.shadowRoot.addEventListener('keydown', (e) => { if (e.key !== 'Enter' || e.target.tagName !== 'INPUT') return; const a = e.target.dataset?.a; if (a === 'pg-text' || a === 'pg-rtext') this._progAction(a === 'pg-text' ? 'pg-add' : 'pg-rok', e.target.dataset.k); });
@@ -1001,7 +1011,28 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
 
   // ---------- actions ----------
 
+  /** Drags a boundary on the day bar (`[data-h]`) or the dial; window listeners, because every move rebuilds the DOM. */
+  _drag(e) {
+    const ed = this._ed, h = e.target.closest('[data-h]'), dial = !h && e.target.closest('.dial');
+    if (this._view !== 'editor' || !ed || e.button || (!h && !dial)) return;
+    e.preventDefault();
+    const box = (h ? h.parentElement : dial).getBoundingClientRect(), step = this._cfg.timeStep;
+    const i = h ? (ed.sel = Number(h.dataset.h)) : ed.sel, x0 = e.clientX, m0 = ed.slots[i].start;
+    const move = (ev) => {
+      if (h) ed.slots = moveBoundary(ed.slots, i, Math.round((m0 + (ev.clientX - x0) / (box.width - 10) * DAY_END) / step) * step - ed.slots[i].start, step);
+      else ed.slots = setTemp(ed.slots, i, dialTemp(ev.clientX - box.left - box.width / 2, ev.clientY - box.top - box.height / 2));
+      this._render(true);
+    };
+    const up = () => {
+      for (const [t, fn] of [['pointermove', move], ['pointerup', up], ['pointercancel', up]]) removeEventListener(t, fn);
+      this._dragged = true; setTimeout(() => { this._dragged = false; }); // swallow the click that ends the drag
+    };
+    for (const [t, fn] of [['pointermove', move], ['pointerup', up], ['pointercancel', up]]) addEventListener(t, fn);
+    if (dial) move(e); // a tap on the dial sets the temperature
+  }
+
   _click(e) {
+    if (this._dragged) return;
     const el = e.target.closest('[data-a]');
     if (!el || el.disabled) return;
     const { a, id } = el.dataset;
@@ -1789,7 +1820,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     const segs = carry + sl.map((x, n) => `<button type="button" class="edseg" data-a="sel" data-k="${n}" style="flex:${x.end - x.start} 1 0;--c:${tempColor(x.temp, dark)}" aria-pressed="${n === ed.sel}"
       aria-label="Úsek ${fmtTime(x.start)}–${fmtTime(x.end)}, ${fmtTemp(x.temp)} °C">${x.end - x.start >= 90 ? `${fmtTemp(x.temp)}°` : ''}</button>`).join('');
     const pos = (m) => `calc(5px + (100% - 10px) * ${(m / DAY_END).toFixed(4)})`;
-    const handles = sl.filter((x) => x.start > 0).map((x) => `<span class="handle" style="left:${pos(x.start)}"></span>`).join('');
+    const handles = sl.map((x, n) => (x.start > 0 ? `<span class="handle" data-h="${n}" style="left:${pos(x.start)}" title="Přetáhněte"></span>` : '')).join('');
     const hlabels = sl.filter((x) => x.start > 0).map((x) => `<span style="left:${pos(x.start)}">${Math.floor(x.start / 60)}:${pad(x.start % 60)}</span>`).join('');
     // Opakování: tabs while the alternation is on; an existing week tag stays visible (and kept) when it is off
     const repeatHtml = this._alternates()
@@ -1835,16 +1866,17 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
   _dialHtml(temp, dark) {
     const S = 188, ctr = S / 2, kr = ctr - 10, sweep = 270;
     const t = Math.min(25, Math.max(15, temp));
-    const f = (t - 15) / 10, sp = (f * sweep).toFixed(1);
-    const stops = dark ? STOPS_DARK : STOPS;
-    const grad = stops.map((h, n) => `${h} ${(n / (stops.length - 1) * sweep).toFixed(1)}deg`).join(', ');
-    const ring = (w, o = 0) => `radial-gradient(closest-side, transparent calc(100% - ${o + w}px), #000 calc(100% - ${o + w - 1}px), #000 calc(100% - ${o}px), transparent calc(100% - ${o}px))`;
-    const bg = `conic-gradient(from 225deg, transparent 0deg ${sp}deg, var(--c-border) ${sp}deg ${sweep}deg, transparent ${sweep}deg), conic-gradient(from 225deg, ${grad}, transparent ${sweep}deg)`;
-    const mask = (m, w, o) => `-webkit-mask: ${m}, ${ring(w, o)}; -webkit-mask-composite: source-in; mask: ${m}, ${ring(w, o)}; mask-composite: intersect`;
+    const f = (t - 15) / 10, sp = f * sweep + 0.01;
+    // ticks as SVG lines (anti-aliased): minor every 3.6°, major every 18°, coloured up to the value
+    const tick = (rel, r1, r2, w) => {
+      const a = (225 + rel) * Math.PI / 180, sx = Math.sin(a), cy = -Math.cos(a), c = rel <= sp ? tempColor(15 + rel / 27, dark) : 'var(--c-border)';
+      return `<line x1="${(ctr + r1 * sx).toFixed(2)}" y1="${(ctr + r1 * cy).toFixed(2)}" x2="${(ctr + r2 * sx).toFixed(2)}" y2="${(ctr + r2 * cy).toFixed(2)}" stroke="${c}" stroke-width="${w}"/>`;
+    };
+    let ticks = '';
+    for (let k = 0; k <= 75; k++) ticks += k % 5 ? tick(k * 3.6, 81, 89, 1.5) : tick(k * 3.6, 77, 93, 3);
     const ang = (225 + f * sweep) * Math.PI / 180, kx = ctr + kr * Math.sin(ang), ky = ctr - kr * Math.cos(ang), kc = tempColor(t, dark);
     return `<div class="dial" role="img" aria-label="Teplota ${fmtTemp(temp)} °C">
-      <div class="ring" style="background:${bg};${mask('repeating-conic-gradient(from 224.5deg, #000 0deg 1deg, transparent 1deg 3.6deg)', 9, 4)}"></div>
-      <div class="ring" style="background:${bg};${mask('repeating-conic-gradient(from 224deg, #000 0deg 2deg, transparent 2deg 18deg)', 17, 0)}"></div>
+      <svg viewBox="0 0 ${S} ${S}" width="${S}" height="${S}" stroke-linecap="round" aria-hidden="true">${ticks}</svg>
       <div class="face"><span class="sec">Teplota</span><b>${fmtTemp(temp)}<small>°C</small></b></div>
       <span class="knob2" style="left:${(kx - 11).toFixed(1)}px;top:${(ky - 11).toFixed(1)}px;background:radial-gradient(circle, ${kc} 0 3px, var(--c-card) 3.5px);border:2px solid ${kc}"></span>
       <span class="lim" style="left:${Math.round(S * 0.19)}px">15°</span><span class="lim" style="right:${Math.round(S * 0.19)}px">25°</span></div>`;
