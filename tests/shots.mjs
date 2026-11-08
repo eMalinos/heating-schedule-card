@@ -24,7 +24,7 @@ const ITEMS = [
   item('v1', ['daily'], 'vacation', [[0, 24, 16]]),
 ];
 let items = ITEMS; // the copy shots add schedules of the other valves
-const PROGRAMS = { programs: ['auto', 'odd', 'even', 'vacation'], program_names: { auto: 'Výchozí', odd: 'Lichý týden', even: 'Sudý týden', vacation: 'Dovolená' } };
+const PROGRAMS = { programs: ['auto', 'odd', 'even', 'vacation'], program_names: { auto: 'Normální', odd: 'Lichý týden', even: 'Sudý týden', vacation: 'Dovolená' } };
 
 const states = (patch = {}) => ({
   [V]: { state: 'heat', attributes: { friendly_name: 'Obývák', temperature: 19 } },
@@ -72,7 +72,7 @@ document.body.style.cssText = `margin:0;padding:24px;background:${dark ? '#10131
   + (dark ? '--ha-card-background:#181c22;--secondary-background-color:#21262e;--divider-color:#262c35;--primary-color:#86a9d1;--primary-text-color:#e9edf2;--secondary-text-color:#949ca8' : '--ha-card-background:#fff;--secondary-background-color:#f0f2f5;--divider-color:#dfe3e8;--primary-color:#4f6b8c;--primary-text-color:#1c2128;--secondary-text-color:#666e79');
 if (shot === 'week') await mk('', {});
 else if (shot === 'fallback') await mk('', {}, 'odd');
-else if (shot === 'editor') { // Editor1: Výchozí, Po–Pá, the 16:00–22:00 slot selected
+else if (shot === 'editor') { // Editor1: Normální, Po–Pá, the 16:00–22:00 slot selected
   const c = await mk('', {});
   c.shadowRoot.querySelector('.row [data-a="open"]').click();
   c.shadowRoot.querySelector('[data-a="sel"][data-k="3"]').click();
@@ -104,7 +104,7 @@ const copyShot = async (pre) => {
 };
 if (shot === 'copy-valve') await copyShot((q) => { q('[data-a="cp-pt"][data-k="vacation"]').click(); });
 else if (shot === 'copy-one') await copyShot((q) => { q('[data-a="cp-mode"][data-k="one"]').click(); q('[data-a="cp-row"][data-k="a1"]').click(); });
-// v3 (Main3.dc.html): Výchozí has odd / even Po–Pá schedules (the alternation is on, Monday 2026-11-02 is an odd week), programs Dovolená + Chata
+// v3 (Main3.dc.html): Normální has odd / even Po–Pá schedules (the alternation is on, Monday 2026-11-02 is an odd week), programs Dovolená + Chata
 const WKD = ['mon', 'tue', 'wed', 'thu', 'fri'];
 const V3 = [
   item('o1', WKD, 'auto', [[0, 6, 18], [6, 8, 21.5], [8, 16, 19], [16, 22, 21.5], [22, 24, 18]], V, ['week:odd']),
@@ -113,7 +113,7 @@ const V3 = [
   item('v1', ['daily'], 'vacation', [[0, 24, 16]]),
 ];
 const V3STATES = (hol = 'calendar') => ({
-  [`sensor.heating_program_${C}`]: { state: 'auto', attributes: { programs: ['auto', 'vacation', 'chata'], program_names: { auto: 'Výchozí', vacation: 'Dovolená', chata: 'Chata' } } },
+  [`sensor.heating_program_${C}`]: { state: 'auto', attributes: { programs: ['auto', 'vacation', 'chata'], program_names: { auto: 'Normální', vacation: 'Dovolená', chata: 'Chata' } } },
   [`sensor.heating_programs_${C}`]: { state: '2', attributes: { programs: [{ id: 'vacation', name: 'Dovolená' }, { id: 'chata', name: 'Chata' }], holidays: [], holiday_error: null } },
   [`input_boolean.heating_week_alternation_${C}`]: { state: 'on', attributes: {} },
   [`input_select.heating_holidays_${C}`]: { state: hol, attributes: {} },

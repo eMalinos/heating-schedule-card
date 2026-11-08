@@ -23,7 +23,7 @@ A Home Assistant card for the weekly heating schedules of climate valves, writte
 
 **Manual:** copy [`dist/heating-schedule-card.js`](dist/heating-schedule-card.js) to `config/www/`, then add a dashboard resource:
 
-Settings → Dashboards → ⋮ → Resources → Add resource → URL `/local/heating-schedule-card.js?v=0.2.6`, type **JavaScript module** → reload the browser. Change `?v=` after copying a new version.
+Settings → Dashboards → ⋮ → Resources → Add resource → URL `/local/heating-schedule-card.js?v=0.3.0`, type **JavaScript module** → reload the browser. Change `?v=` after copying a new version.
 
 ## Configuration
 
@@ -44,9 +44,9 @@ Circuits are discovered: every `sensor.heating_schedule_<id>` with a `targets` a
 The card only stores schedules in scheduler-component; it never controls a valve itself.
 
 - The schedule switches stay **off** (the heating feature keeps them off). Node-RED reads the schedules and applies the slots to the valves at every slot start, so the scheduler never fires.
-- **Programs** come from the heating feature's `programs` parameter (`sensor.heating_program_<circuit>`: `programs` and `program_names`); Výchozí (`auto`) is always first. The chips show them, a schedule's program is its tag `program:<id>` (none = `auto`).
-- **Fallback**: a program with no schedule for a weekday uses the Výchozí schedule of that day, per day (same rules as the heating feature's `heating_slot_temp`). A program without schedules shows "používá výchozí rozvrh" and can be given its own copy of the Výchozí schedules.
-- **Weeks**: the tag `week:odd` / `week:even` (none = every week) limits a schedule to odd / even weeks. The weeks alternate strictly every 7 days, counted from Monday 2025-12-29 = odd (the heating's `heating_week_parity`; never ISO week % 2, because 2026 has ISO week 53), the badge shows that parity with the ISO number. The per-day fallback and the carry-over from the previous day use the week of the day they look at. Odd and even schedules of the same weekdays never conflict; a schedule without a tag conflicts with both. A copy keeps the tag.
+- **Programs** come from the heating feature (`sensor.heating_program_<circuit>`: `programs` and `program_names`): Normální (`auto`) always first, Dovolená (`vacation`, can be renamed, not deleted), Lichý/sudý týden (`alternating`, while switched on in the settings), then the circuit's own programs. The chips show them, a schedule's program is its tag `program:<id>` (none = `auto`).
+- **Fallback**: a program with no schedule for a weekday uses the Normální schedule of that day, per day; Dovolená uses Normální's **Sunday** schedule every day (same rules as the heating feature's `heating_slot_temp`). A program without schedules shows "používá Normální rozvrh" and can be given its own copy of the Normální schedules (Dovolená: Normální's Sunday schedules for every day).
+- **Weeks**: the tag `week:odd` / `week:even` (none = every week) limits a schedule to odd / even weeks. The weeks alternate strictly every 7 days, counted from Monday 2025-12-29 = odd (the heating's `heating_week_parity`; never ISO week % 2, because 2026 has ISO week 53), the badge shows that parity with the ISO number. *Prohodit lichý a sudý týden* (`input_boolean.heating_week_swap_<circuit>`) inverts it. The editor offers the week tabs only in the program Lichý/sudý týden; a tag elsewhere is shown and kept. The per-day fallback and the carry-over from the previous day use the week of the day they look at. Odd and even schedules of the same weekdays never conflict; a schedule without a tag conflicts with both. A copy keeps the tag.
 - **Holidays**: with *Státní svátky* set to *Z kalendáře* (a calendar of the Holiday integration, `calendar.czechia` preselected; the holidays the heating imported into `sensor.heating_programs_<circuit>` attribute `holidays`, `[{date, name}]`), a holiday counts as Sunday, as in the heating's `heating_slot_temp`. The now tile says *Svátek · podle neděle*.
 - **Pause**: the tag `paused` (the "Aktivní" toggle) removes a schedule from the heating without deleting it.
 - **Copy** writes new schedules for the target valves, tagged with the same program; a target valve whose circuit lacks the program is skipped.
@@ -54,12 +54,13 @@ The card only stores schedules in scheduler-component; it never controls a valve
 
 ### What the card writes besides schedules
 
-Needs heating 1.10.0 or newer (programs, weeks, holidays from the Holiday integration, #352, #356). All helpers belong to the circuit (`<circuit>` = the heating instance):
+Needs heating 1.15.0 or newer (Normální, Dovolená, Lichý/sudý týden, week swap: HFB #482). All helpers belong to the circuit (`<circuit>` = the heating instance):
 
 | Action | Call |
 | --- | --- |
-| Add / rename / delete a program | `script.heating_programs_set_<circuit>` with `programs` = the whole list `[{id, name}]` without Výchozí; read back from `sensor.heating_programs_<circuit>` attribute `programs`. The id is a slug of the name (ASCII lower-case, `_`); `auto` and the name *Výchozí* are reserved, a used name or id is refused before writing. Deleting a program writes the list first (waits until both `sensor.heating_programs_<circuit>` and `sensor.heating_program_<circuit>` show it; a read-back that is late is re-checked after 5 s, not treated as a failure), then removes its schedules on the circuit's valves; a failing removal puts the removed schedules and the old list back. The running program, or a program with a read-only schedule, cannot be deleted from the card. The program lists come from `sensor.heating_program_<circuit>` everywhere; extra fields of the stored entries are kept. |
-| Střídat lichý a sudý týden | `input_boolean.toggle` on `input_boolean.heating_week_alternation_<circuit>` (it only shows the week controls; the tags always count) |
+| Add / rename / delete a program | `script.heating_programs_set_<circuit>` with `programs` = the whole list `[{id, name}]` without Normální and Lichý/sudý týden; read back from `sensor.heating_programs_<circuit>` attribute `programs`. The id is a slug of the name (ASCII lower-case, `_`); `auto`, `alternating`, `vacation` (except renaming Dovolená) and the names *Normální* / *Výchozí* are reserved, a used name or id is refused before writing. Deleting a program writes the list first (waits until both `sensor.heating_programs_<circuit>` and `sensor.heating_program_<circuit>` show it; a read-back that is late is re-checked after 5 s, not treated as a failure), then removes its schedules on the circuit's valves; a failing removal puts the removed schedules and the old list back. The running program, Dovolená, Lichý/sudý týden, or a program with a read-only schedule, cannot be deleted from the card. The program lists come from `sensor.heating_program_<circuit>` everywhere; extra fields of the stored entries are kept. |
+| Program Lichý/sudý týden | `input_boolean.toggle` on `input_boolean.heating_week_alternation_<circuit>` (the program exists while on; the tags always count) |
+| Prohodit lichý a sudý týden | `input_boolean.toggle` on `input_boolean.heating_week_swap_<circuit>` (shown while the program is on) |
 | Státní svátky | `input_select.select_option` (`none` / `calendar`; any other stored value shows as *Žádné*) on `input_select.heating_holidays_<circuit>` |
 | Kalendář svátků | `input_text.set_value` on `input_text.heating_holiday_calendar_<circuit>` (a `calendar.*` entity; set to `calendar.czechia` when *Z kalendáře* is chosen and none is set yet) |
 
