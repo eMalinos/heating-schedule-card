@@ -592,7 +592,7 @@ export function checkProgram(name, list, exceptId = null) {
   const n = String(name ?? '').trim(), id = slugify(n), low = n.toLocaleLowerCase('cs');
   const error = !n ? 'Zadej název programu'
     : !id ? 'Název musí obsahovat písmeno nebo číslici'
-    : ['auto', 'normalni', 'vychozi', 'alternating'].includes(id) || (id === 'vacation' && exceptId !== 'vacation') ? 'Tento název je vyhrazený'
+    : ['auto', 'normalni', 'vychozi', 'alternating', 'lichy_sudy_tyden'].includes(id) || (id === 'vacation' && exceptId !== 'vacation') ? 'Tento název je vyhrazený'
     : list.some((p) => p.id !== exceptId && (p.id === id || String(p.name).trim().toLocaleLowerCase('cs') === low)) ? 'Program s tímto názvem už existuje' : '';
   return { id, error };
 }
@@ -1725,7 +1725,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
       ${errHtml}
       <div class="swrow"><div class="tx"><b>Program Lichý/sudý týden</b><span class="sec">Jeho rozvrhy platí každý týden, jen v lichém, nebo jen v sudém; co nemá, jede podle Normálního. Teď je ${WEEK_LABEL[parity]} týden.</span></div>
         <button type="button" class="switch" role="switch" aria-checked="${alt}" aria-label="Program Lichý/sudý týden" data-a="st-alt" data-k="" ${st[`input_boolean.heating_week_alternation_${id}`] ? '' : 'disabled'}></button></div>
-      ${alt ? `<div class="swrow"><div class="tx"><b>Prohodit lichý a sudý týden</b><span class="sec">Týdny se střídají po 7 dnech. Nesedí-li s kalendářem (po roce s 53 týdny), prohoďte je.</span></div>
+      ${alt || swap ? `<div class="swrow"><div class="tx"><b>Prohodit lichý a sudý týden</b><span class="sec">Týdny se střídají po 7 dnech. Nesedí-li s kalendářem (po roce s 53 týdny), prohoďte je.</span></div>
         <button type="button" class="switch" role="switch" aria-checked="${swap}" aria-label="Prohodit lichý a sudý týden" data-a="st-swap" data-k="" ${st[`input_boolean.heating_week_swap_${id}`] ? '' : 'disabled'}></button></div>` : ''}
       <div class="col"><span class="label">Státní svátky</span>
         <div class="tabs">${tab('none', 'Žádné')}${tab('calendar', 'Z kalendáře')}</div>
@@ -1803,7 +1803,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
           <span class="ic">${icon('calendarWeek')}</span>
           <div class="tx"><b>${esc(progName)} používá ${prog === 'vacation' ? 'neděli Normálního' : 'Normální rozvrh'}</b><span class="sec">Hlavice pojede ${prog === 'vacation' ? 'každý den podle neděle Normálního' : 'podle Normálního'}, dokud tu nebude vlastní rozvrh.</span></div>
         </div>
-        <div class="rows dim">${dflt.map((s) => `<div class="row${s.editable ? '' : ' ro'}"><div class="top"><span class="open"><span class="lbl"><b>${esc(daysLabel(s.days))}</b>${pill(s)}</span><span class="sec">Normální</span></span></div>${bar(s, false)}</div>`).join('') || '<span class="sec">Normální rozvrh nemá žádné úseky.</span>'}</div>
+        <div class="rows dim">${dflt.map((s) => `<div class="row${s.editable ? '' : ' ro'}"><div class="top"><span class="open"><span class="lbl"><b>${esc(prog === 'vacation' ? 'Každý den' : daysLabel(s.days))}</b>${pill(s)}</span><span class="sec">${prog === 'vacation' ? 'neděle Normálního' : 'Normální'}</span></span></div>${bar(s, false)}</div>`).join('') || '<span class="sec">Normální rozvrh nemá žádné úseky.</span>'}</div>
         <button type="button" class="btn primary wide" data-a="copyDefault" ${copyable && !this._busy.has('copy') ? '' : 'disabled'}>${icon('contentCopy')}Vlastní rozvrh pro ${esc(progName.toLowerCase())}</button>`;
     }
 
@@ -1888,8 +1888,9 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     const pos = (m) => `calc(5px + (100% - 10px) * ${(m / DAY_END).toFixed(4)})`;
     const handles = sl.map((x, n) => (x.start > 0 ? `<span class="handle" data-h="${n}" style="left:${pos(x.start)}" title="Přetáhněte"></span>` : '')).join('');
     const hlabels = sl.filter((x) => x.start > 0).map((x) => `<span style="left:${pos(x.start)}">${Math.floor(x.start / 60)}:${pad(x.start % 60)}</span>`).join('');
-    // Opakování: tabs only in the program Lichý/sudý týden while it is on; an existing week tag elsewhere stays visible (and kept)
-    const repeatHtml = ed.program === 'alternating' && this._alternates()
+    // Opakování: tabs in the program Lichý/sudý týden while it is on, and for a schedule that already has a week tag (to change
+    // or drop it); elsewhere none
+    const repeatHtml = (ed.program === 'alternating' && this._alternates()) || (ed.existing?.week && ed.program !== 'alternating')
       ? `<div class="col"><span class="label">Opakování</span><div class="tabs">${[['all', 'Každý týden'], ['odd', 'Lichý'], ['even', 'Sudý']].map(([k, n]) =>
         `<button type="button" class="tab" data-a="wk" data-k="${k}" aria-pressed="${(ed.week ?? 'all') === k}">${n}</button>`).join('')}</div></div>`
       : ed.week ? `<div class="col"><span class="label">Opakování</span><span class="repro">${WEEK_LABEL[ed.week]} týden</span></div>` : '';

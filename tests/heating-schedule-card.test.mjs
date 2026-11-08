@@ -816,7 +816,7 @@ test('slugify / checkProgram: id from the name, reserved and used names, per-fie
   assert.equal(checkProgram('Chata!', [...list, { id: 'chata', name: 'Hytta' }]).error, 'Program s tímto názvem už existuje'); // the id already used
   assert.equal(checkProgram('Dovolená!', list, 'vacation').error, '', 'renaming a program keeps its own id');
   assert.equal(checkProgram('Dovolená', list, 'vacation').error, '');
-  for (const n of ['vacation', 'Alternating', 'Normální']) assert.equal(checkProgram(n, list).error, 'Tento název je vyhrazený');
+  for (const n of ['vacation', 'Alternating', 'Normální', 'Lichý/sudý týden']) assert.equal(checkProgram(n, list).error, 'Tento název je vyhrazený');
   assert.equal(ymd(at(2026, 1, 5)), '2026-01-05');
 });
 

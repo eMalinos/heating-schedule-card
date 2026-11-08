@@ -834,11 +834,12 @@
     await tick(150);
     r.v2NewSave = A.log.join() === 'add' && A.items.length === 2 && A.items[1].tags.includes('week:even') && A.items[1].tags.includes('program:alternating');
     cw.remove();
-    // alternation off: an existing tag is shown read-only and kept; no tabs; a new schedule has no tag
+    // alternation off: an existing tag keeps its tabs and is kept; a new schedule has no tag and no tabs
     A = mkHA([mkItem('we', WK, ['program:auto', 'week:even'], 22)], { [ALT]: { state: 'off', attributes: {} } });
     cw = await mkCard(A.hass, cfgK);
     click(cw, '.row [data-a="open"]');
-    r.v2EdOff = !cw.shadowRoot.querySelector('[data-a="wk"]') && text(cw, '.repro') === 'sudý týden';
+    // a tagged schedule outside Lichý/sudý týden keeps its tabs, so the tag can be changed or dropped
+    r.v2EdOff = cw.shadowRoot.querySelector('[data-a="wk"][aria-pressed="true"]')?.dataset.k === 'even' && !cw.shadowRoot.querySelector('.repro');
     click(cw, '[data-a="day"][data-k="sat"]');
     click(cw, '[data-a="save"]');
     await tick(150);
