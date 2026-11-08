@@ -5,7 +5,7 @@ A Home Assistant card for the weekly heating schedules of climate valves, writte
 ## Features
 
 - **Week view**: a "now" tile (current setpoint, next change, the state the heating automation reports), program chips, one temperature-coloured 24 h bar per weekday group, and a per-schedule "Aktivní" pause.
-- **Editor**: weekdays, a 24 h bar with selectable slots, start / end +/- `time_step`, split / delete a slot, a Bento dial in 0.5 degree steps. The time before a first slot after 00:00 (carried over from the previous day) can be tapped to become a slot of its own from 00:00. A card without `valve` first asks for which valves a new schedule is made.
+- **Editor**: weekdays, a 24 h bar with selectable slots, start / end +/- `time_step`, split / delete a slot, a Bento dial in 0.5 degree steps. The time before a first slot after 00:00 is the last slot running on past midnight: tapping it selects that slot, whose end (the next day) and temperature can be changed. A card without `valve` first asks for which valves a new schedule is made.
 - **Copy to other valves**: a whole valve or selected schedules, Nahradit / Jen doplnit, with a per-valve preview.
 - **Programs**: a dashed `+ Program` chip and a *Programy* view (also from the settings): add, rename and delete programs of the circuit.
 - **Odd / even weeks**: a schedule can apply every week, only in odd weeks, or only in even weeks (tabs *Každý týden / Lichý / Sudý* in the editor while the alternation is on); the week view shows the current week and dims the rows of the other one. Day presets *Pracovní dny / Víkend / Každý den* in the editor.
@@ -23,7 +23,7 @@ A Home Assistant card for the weekly heating schedules of climate valves, writte
 
 **Manual:** copy [`dist/heating-schedule-card.js`](dist/heating-schedule-card.js) to `config/www/`, then add a dashboard resource:
 
-Settings → Dashboards → ⋮ → Resources → Add resource → URL `/local/heating-schedule-card.js?v=0.2.4`, type **JavaScript module** → reload the browser. Change `?v=` after copying a new version.
+Settings → Dashboards → ⋮ → Resources → Add resource → URL `/local/heating-schedule-card.js?v=0.2.5`, type **JavaScript module** → reload the browser. Change `?v=` after copying a new version.
 
 ## Configuration
 

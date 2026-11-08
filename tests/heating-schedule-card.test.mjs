@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import {
   normalizeConfig, circuitName, parseSchedule, toPayload, effective, slotAt, groupByProgram, daysLabel, tempColor, fmtTemp, fmtTime,
   discoverCircuits, loadSchedules, saveSchedule, removeSchedule, nowState, DASH, isFallbackProgram, barSegments, slotsSummary,
-  normalizeSlots, claimCarry, splitSlot, removeSlot, moveBoundary, setTemp, daysConflict, planCopy, copyable,
+  normalizeSlots, splitSlot, removeSlot, moveBoundary, setTemp, daysConflict, planCopy, copyable,
   weekParity, isoWeek, holidayDates, slugify, checkProgram, ymd, dialTemp,
 } from '../dist/heating-schedule-card.js';
 
@@ -421,14 +421,6 @@ test('removeSlot: merges into the previous, the first into the next, the only on
   const one = [{ start: 0, end: 1440, temp: 20 }];
   assert.equal(removeSlot(one, 0), one);
   for (let i = 0; i < 3; i++) assert.ok(cover(removeSlot(S3, i)));
-});
-
-test('claimCarry: the carried-over morning becomes an editable slot from 00:00', () => {
-  const late = [{ start: 900, end: 1320, temp: 21 }, { start: 1320, end: 1440, temp: 18 }];
-  const c = claimCarry(late);
-  assert.deepEqual(c, [{ start: 0, end: 900, temp: 18 }, ...late]);
-  assert.ok(cover(c));
-  assert.equal(claimCarry(S3), S3); // already from 00:00: nothing to claim
 });
 
 test('moveBoundary: clamped, min length = step, coverage kept', () => {
