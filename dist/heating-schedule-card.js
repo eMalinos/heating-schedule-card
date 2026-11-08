@@ -1,6 +1,6 @@
 // heating-schedule-card: weekly heating schedules of climate valves, stored by scheduler-component.
 // One plain ES module: no build step, no dependencies. Pure functions are exported for `node --test`.
-const VERSION = '0.2.5';
+const VERSION = '0.2.6';
 const isCal = (v) => typeof v === 'string' && v.startsWith('calendar.');
 const CZ_CALENDAR = 'calendar.czechia'; // the calendar the Holiday integration creates for Czechia
 
@@ -257,6 +257,27 @@ export function slotAt(schedules, valve, program, date, ctx = {}) {
     schedule: pick.schedule, isFallback: pick.isFallback,
     boundary, next: nxt,
   };
+}
+
+/**
+ * Where the morning before `sched`'s late first start comes from on its weekdays (over the next two weeks, so both week
+ * parities count): the last slot of the previous day's schedules, by the same rules as heating (program, Výchozí
+ * fallback, weeks; holidays left out). -> [{schedule, days, start, temp}] for the schedules other than `sched`.
+ */
+export function carryOrigins(schedules, sched, from = new Date()) {
+  if (!(sched.slots[0]?.start > 0)) return [];
+  const list = [...schedules.filter((s) => s.id !== sched.id), sched];
+  const at = (d, k) => { const x = new Date(d); x.setDate(x.getDate() + k); return x; };
+  const out = new Map();
+  for (let k = 0; k < 14; k++) {
+    const d = at(from, k);
+    if (!effective(list, sched.valve, sched.program, d).schedules.includes(sched)) continue;
+    const last = slotsOf(effective(list, sched.valve, sched.program, at(d, -1)).schedules).pop();
+    if (!last || last.schedule === sched) continue; // no schedule the day before: heating takes today's own last slot
+    const o = out.get(last.schedule) ?? out.set(last.schedule, { schedule: last.schedule, days: [], start: last.start, temp: last.temp }).get(last.schedule);
+    if (!o.days.includes(dow(d))) o.days.push(dow(d));
+  }
+  return [...out.values()].map((o) => ({ ...o, days: DAYS.filter((d) => o.days.includes(d)) }));
 }
 
 /** Schedules of one valve grouped by program: Map(program -> [schedule]), `auto` first. */
@@ -759,6 +780,8 @@ const STYLE = `
   .why { font-size: 13px; color: var(--c-warm); }
   .why:empty { display: none; }
   .edseg.carry { background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--c) 55%, var(--c-fill)) 0 6px, color-mix(in srgb, var(--c) 35%, var(--c-fill)) 6px 12px); color: var(--c-text2); font-size: 11px; font-weight: 600; box-shadow: none; }
+  .carrynote { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 6px; font-size: 13px; color: var(--c-text2); }
+  .carrynote span { flex: 1 1 200px; }
   .err.stale { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
   .err.stale span { flex: 1 1 160px; font-weight: 600; }
   .tile { position: relative; display: flex; align-items: center; gap: 10px; min-width: 0; min-height: 56px; padding: 10px 12px; border: 1px solid transparent; border-radius: 16px; background: var(--c-fill); box-shadow: var(--c-inset); text-align: left; }
@@ -1159,6 +1182,13 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     }
     else if (a === 'sel') ed.sel = i;
     else if (a === 'carry') ed.sel = ed.slots.length - 1; // the carried-over morning is the last slot running past midnight
+    else if (a === 'carryOpen') {
+      // the schedule the morning really comes from on some days: its editor, its evening slot selected
+      const s = this._schedules.find((x) => x.id === k);
+      if (!s?.editable || this._edChanged(ed)) return;
+      this._openExisting(s);
+      this._ed.sel = this._ed.slots.length - 1;
+    }
     else if (a === 'sdn' || a === 'sup') ed.slots = moveBoundary(ed.slots, ed.sel, a === 'sdn' ? -step : step, step);
     else if (a === 'edn' || a === 'eup') {
       // the last slot of a schedule with a late first start ends the next day, where the first slot starts
@@ -1178,6 +1208,13 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     else if (a === 'delok') return this._deleteEditor();
     else if (a === 'save') return this._saveEditor();
     this._render(true);
+  }
+
+  /** The editor differs from the stored schedule (a new one always does). */
+  _edChanged(ed) {
+    const x = ed.existing;
+    return !x || ed.week !== x.week || DAYS.filter((d) => ed.days.includes(d)).join() !== x.days.join()
+      || JSON.stringify(ed.slots) !== JSON.stringify(x.slots.map(({ start, end, temp }) => ({ start, end, temp })));
   }
 
   _leave() { this._view = 'week'; this._ed = this._pick = this._copy = this._pg = null; }
@@ -1811,6 +1848,14 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     why.textContent = block;
   }
 
+  /** Under the selected last slot: the weekdays whose morning another schedule's evening holds, with a way to edit that one. */
+  _carryNotes(ed) {
+    const model = { ...ed.existing, id: ed.existing?.id ?? null, valve: ed.valves[0], valves: ed.valves, program: ed.program, week: ed.week, days: ed.days, slots: ed.slots, paused: false };
+    const changed = this._edChanged(ed);
+    return carryOrigins(this._schedules, model).map((o) => `<div class="carrynote"><span>${daysLabel(o.days)} ráno pokračuje rozvrh <b>${esc(schedName(o.schedule))}</b>${o.schedule.program !== ed.program ? ' (Výchozí)' : ''} od ${fmtTime(o.start)}, ${fmtTemp(o.temp)} °C.${changed && o.schedule.editable ? ' Nejdřív uložte nebo zrušte změny.' : ''}</span>
+      ${o.schedule.editable ? `<button type="button" class="btn small" data-a="carryOpen" data-k="${esc(o.schedule.id)}" ${changed ? 'disabled' : ''}>Upravit ${esc(schedName(o.schedule))}</button>` : ''}</div>`).join('');
+  }
+
   _editorHtml(dark, errHtml) {
     const ed = this._ed, step = this._cfg.timeStep, states = this._hass?.states ?? {};
     const sl = ed.slots, cur = sl[ed.sel], last = sl.length - 1;
@@ -1848,7 +1893,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
       <div class="col"><div class="lrow"><span class="label">Dny</span><div class="presets">${[['workday', 'Pracovní dny'], ['weekend', 'Víkend'], ['daily', 'Každý den']].map(([k, n]) =>
         `<button type="button" class="preset" data-a="preset" data-k="${k}">${n}</button>`).join('')}</div></div><div class="days">${daysHtml}</div></div>
       ${repeatHtml}
-      <div class="col"><span class="label">Průběh dne</span><div class="edbar">${segs}${handles}</div><div class="hlabels">${hlabels}</div></div>
+      <div class="col"><span class="label">Průběh dne</span><div class="edbar">${segs}${handles}</div><div class="hlabels">${hlabels}</div>${wrap ? this._carryNotes(ed) : ''}</div>
       <div class="panel">
         <div class="l"><span class="label">Úsek ${fmtTime(cur.start)}–${fmtTime(end)}${wrap ? ' další den' : ''}</span>
           ${stepTile('Začátek', cur.start, 'sdn', 'sup', ed.sel > 0 || cur.start > 0)}${stepTile(wrap ? 'Konec další den' : 'Konec', end, 'edn', 'eup', ed.sel < last || wrap)}

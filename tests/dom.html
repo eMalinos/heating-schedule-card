@@ -371,6 +371,23 @@
     await tick(150);
     r.wrapSave = calls.length === 1 && calls[0].body.timeslots.map((t) => t.start).join() === '06:15:00,20:00:00'
       && calls[0].body.timeslots[1].actions[0].service_data.temperature === 19.5;
+    c14.remove();
+    // Monday morning comes from the weekend's evening: a note under the selected slot, and a way to that schedule
+    const wkend = { ...late, schedule_id: 'we1', entity_id: 'switch.schedule_we1', weekdays: ['sat', 'sun'], timeslots: [{ ...late.timeslots[0], start: '07:00', stop: '23:00' }, { ...late.timeslots[1], start: '23:00', stop: '23:59', actions: [{ ...late.timeslots[1].actions[0], service_data: { temperature: 18.5 } }] }] };
+    items = [late, wkend];
+    const cCarry = await mkCard(mkHass({ callApi: async () => {} }), withValve);
+    const sCarry = cCarry.shadowRoot;
+    click(cCarry, '.row [data-a="open"]');
+    click(cCarry, '[data-a="carry"]');
+    r.carryNote = sCarry.querySelector('.carrynote span')?.textContent.startsWith('Po ráno pokračuje rozvrh So–Ne od 23:00, 18,5 °C.')
+      && !sCarry.querySelector('[data-a="carryOpen"]').disabled;
+    click(cCarry, '[data-a="tup"]');
+    r.carryNoteDirty = sCarry.querySelector('[data-a="carryOpen"]').disabled && sCarry.querySelector('.carrynote span').textContent.includes('Nejdřív uložte');
+    click(cCarry, '[data-a="tdn"]');
+    click(cCarry, '[data-a="carryOpen"]');
+    r.carryOpen = sCarry.querySelector('.panel .label')?.textContent === 'Úsek 23:00–07:00 další den'
+      && sCarry.querySelector('.carrynote span')?.textContent.startsWith('So ráno pokračuje rozvrh Po–Pá od 20:00, 19 °C.');
+    cCarry.remove();
 
     // stored version changed since the editor opened: no overwrite, "Načíst znovu" reloads it; paused / name come from the stored one
     items = [weekdays];
