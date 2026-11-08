@@ -1,6 +1,6 @@
 // heating-schedule-card: weekly heating schedules of climate valves, stored by scheduler-component.
 // One plain ES module: no build step, no dependencies. Pure functions are exported for `node --test`.
-const VERSION = '0.2.3';
+const VERSION = '0.2.4';
 const isCal = (v) => typeof v === 'string' && v.startsWith('calendar.');
 const CZ_CALENDAR = 'calendar.czechia'; // the calendar the Holiday integration creates for Czechia
 
@@ -289,6 +289,9 @@ const snap = (m, step) => Math.round(m / step) * step;
 
 /** Copy of the slots for editing. A first slot after 00:00 stays as it is: the time before it is carried over from the previous day. */
 export const normalizeSlots = (slots) => slots.map((x) => ({ ...x }));
+
+/** The carried-over time before a late first slot becomes a slot of its own from 00:00, at the temperature of the last slot (what this schedule's evening holds overnight). */
+export const claimCarry = (slots) => (slots[0]?.start > 0 ? [{ start: 0, end: slots[0].start, temp: slots.at(-1).temp }, ...slots] : slots);
 
 /** Splits slot `i` in halves at the nearest `step`; both halves keep at least `step`. */
 export function splitSlot(slots, i, step = 15) {
@@ -758,7 +761,7 @@ const STYLE = `
   .dial .lim { bottom: 2px; font-size: 11px; font-weight: 600; color: var(--c-text2); }
   .why { font-size: 13px; color: var(--c-warm); }
   .why:empty { display: none; }
-  .edseg.carry { background: repeating-linear-gradient(135deg, var(--c-fill) 0 6px, color-mix(in srgb, var(--c-text2) 14%, var(--c-fill)) 6px 12px); color: var(--c-text2); font-size: 11px; font-weight: 600; box-shadow: none; cursor: default; }
+  .edseg.carry { background: repeating-linear-gradient(135deg, var(--c-fill) 0 6px, color-mix(in srgb, var(--c-text2) 14%, var(--c-fill)) 6px 12px); color: var(--c-text2); font-size: 11px; font-weight: 600; box-shadow: none; }
   .err.stale { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
   .err.stale span { flex: 1 1 160px; font-weight: 600; }
   .tile { position: relative; display: flex; align-items: center; gap: 10px; min-width: 0; min-height: 56px; padding: 10px 12px; border: 1px solid transparent; border-radius: 16px; background: var(--c-fill); box-shadow: var(--c-inset); text-align: left; }
@@ -1158,6 +1161,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
       if (!ed.existing && !ed.daysTouched) ed.days = this._freeDays(ed.valves, ed.program, ed.week);
     }
     else if (a === 'sel') ed.sel = i;
+    else if (a === 'carry') { ed.slots = claimCarry(ed.slots); ed.sel = 0; }
     else if (a === 'sdn' || a === 'sup') ed.slots = moveBoundary(ed.slots, ed.sel, a === 'sdn' ? -step : step, step);
     else if (a === 'edn' || a === 'eup') ed.slots = moveBoundary(ed.slots, ed.sel + 1, a === 'edn' ? -step : step, step);
     else if (a === 'split') ed.slots = splitSlot(ed.slots, ed.sel, step);
@@ -1816,7 +1820,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     const btn = (a, label, svg, dis = false) => `<button type="button" class="step" data-a="${a}" data-k="" aria-label="${label}" ${dis ? 'disabled' : ''}>${svg}</button>`;
     const stepTile = (label, value, dn, up, canMove) => `<div class="ttile"><div><span class="sec">${label}</span><b>${fmtTime(value)}</b></div>
       <div class="pair">${btn(dn, `${label} o ${step} minut dřív`, icon('minus', 18), !canMove)}${btn(up, `${label} o ${step} minut později`, icon('plus', 18), !canMove)}</div></div>`;
-    const carry = sl[0].start > 0 ? `<span class="edseg carry" style="flex:${sl[0].start} 1 0" aria-label="Od půlnoci do ${fmtTime(sl[0].start)} platí rozvrh z předchozího dne">${sl[0].start >= 150 ? 'z předchozího dne' : ''}</span>` : '';
+    const carry = sl[0].start > 0 ? `<button type="button" class="edseg carry" data-a="carry" data-k="" style="flex:${sl[0].start} 1 0" aria-label="Od půlnoci do ${fmtTime(sl[0].start)} platí rozvrh z předchozího dne, klepnutím nastavit vlastní úsek">${sl[0].start >= 150 ? 'z předchozího dne' : ''}</button>` : '';
     const segs = carry + sl.map((x, n) => `<button type="button" class="edseg" data-a="sel" data-k="${n}" style="flex:${x.end - x.start} 1 0;--c:${tempColor(x.temp, dark)}" aria-pressed="${n === ed.sel}"
       aria-label="Úsek ${fmtTime(x.start)}–${fmtTime(x.end)}, ${fmtTemp(x.temp)} °C">${x.end - x.start >= 90 ? `${fmtTemp(x.temp)}°` : ''}</button>`).join('');
     const pos = (m) => `calc(5px + (100% - 10px) * ${(m / DAY_END).toFixed(4)})`;
