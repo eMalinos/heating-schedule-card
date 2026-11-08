@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import {
   normalizeConfig, circuitName, parseSchedule, toPayload, effective, slotAt, groupByProgram, daysLabel, tempColor, fmtTemp, fmtTime,
   discoverCircuits, loadSchedules, saveSchedule, removeSchedule, nowState, DASH, isFallbackProgram, barSegments, slotsSummary,
-  normalizeSlots, splitSlot, removeSlot, moveBoundary, setTemp, daysConflict, planCopy, copyable,
+  normalizeSlots, carryOrigins, splitSlot, removeSlot, moveBoundary, setTemp, daysConflict, planCopy, copyable,
   weekParity, isoWeek, holidayDates, slugify, checkProgram, ymd, dialTemp,
 } from '../dist/heating-schedule-card.js';
 
@@ -421,6 +421,21 @@ test('removeSlot: merges into the previous, the first into the next, the only on
   const one = [{ start: 0, end: 1440, temp: 20 }];
   assert.equal(removeSlot(one, 0), one);
   for (let i = 0; i < 3; i++) assert.ok(cover(removeSlot(S3, i)));
+});
+
+test('carryOrigins: the weekdays whose morning another schedule\'s evening holds', () => {
+  const mk = (id, days, slots, extra = {}) => ({ id, valve: 'climate.v', valves: ['climate.v'], program: 'auto', week: null, days, slots, paused: false, editable: true, ...extra });
+  const wd = mk('wd', ['mon', 'tue', 'wed', 'thu', 'fri'], [{ start: 900, end: 1320, temp: 21 }, { start: 1320, end: 1440, temp: 18 }]);
+  const we = mk('we', ['sat', 'sun'], [{ start: 0, end: 420, temp: 18 }, { start: 420, end: 1380, temp: 21 }, { start: 1380, end: 1440, temp: 18.5 }]);
+  const mon = new Date(2026, 10, 9, 12); // Monday
+  assert.deepEqual(carryOrigins([wd, we], wd, mon), [{ schedule: we, days: ['mon'], start: 1380, temp: 18.5 }]);
+  assert.deepEqual(carryOrigins([wd, we], we, mon), []); // starts at 00:00: nothing carried over
+  // every day from the same schedule: nothing to point at
+  const daily = mk('d', ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'], wd.slots);
+  assert.deepEqual(carryOrigins([daily], daily, mon), []);
+  // a program without a schedule for Sunday: Výchozí's evening holds Monday morning
+  const vac = mk('vac', ['mon', 'tue', 'wed', 'thu', 'fri'], wd.slots, { program: 'vacation' });
+  assert.deepEqual(carryOrigins([wd, we, vac], vac, mon).map((o) => [o.schedule.id, o.days.join()]), [['we', 'mon']]);
 });
 
 test('moveBoundary: clamped, min length = step, coverage kept', () => {
