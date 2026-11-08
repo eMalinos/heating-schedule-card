@@ -451,7 +451,7 @@ test('carryOrigins: the weekdays whose morning another schedule\'s evening holds
   // every day from the same schedule: nothing to point at
   const daily = mk('d', ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'], wd.slots);
   assert.deepEqual(carryOrigins([daily], daily, mon), []);
-  // a program without a schedule for Sunday: Výchozí's evening holds Monday morning
+  // a program without a schedule for Sunday: Normální's evening holds Monday morning
   const vac = mk('vac', ['mon', 'tue', 'wed', 'thu', 'fri'], wd.slots, { program: 'vacation' });
   assert.deepEqual(carryOrigins([wd, we, vac], vac, mon).map((o) => [o.schedule.id, o.days.join()]), [['we', 'mon']]);
 });

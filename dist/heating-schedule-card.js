@@ -263,7 +263,7 @@ export function slotAt(schedules, valve, program, date, ctx = {}) {
 
 /**
  * Where the morning before `sched`'s late first start comes from on its weekdays (over the next two weeks, so both week
- * parities count): the last slot of the previous day's schedules, by the same rules as heating (program, Výchozí
+ * parities count): the last slot of the previous day's schedules, by the same rules as heating (program, Normální
  * fallback, weeks; holidays left out). -> [{schedule, days, start, temp}] for the schedules other than `sched`.
  */
 export function carryOrigins(schedules, sched, from = new Date()) {
@@ -1867,7 +1867,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
   _carryNotes(ed) {
     const model = { ...ed.existing, id: ed.existing?.id ?? null, valve: ed.valves[0], valves: ed.valves, program: ed.program, week: ed.week, days: ed.days, slots: ed.slots, paused: false };
     const changed = this._edChanged(ed);
-    return carryOrigins(this._schedules, model).map((o) => `<div class="carrynote"><span>${daysLabel(o.days)} ráno pokračuje rozvrh <b>${esc(schedName(o.schedule))}</b>${o.schedule.program !== ed.program ? ' (Výchozí)' : ''} od ${fmtTime(o.start)}, ${fmtTemp(o.temp)} °C.${changed && o.schedule.editable ? ' Nejdřív uložte nebo zrušte změny.' : ''}</span>
+    return carryOrigins(this._schedules, model).map((o) => `<div class="carrynote"><span>${daysLabel(o.days)} ráno pokračuje rozvrh <b>${esc(schedName(o.schedule))}</b>${o.schedule.program !== ed.program ? ' (Normální)' : ''} od ${fmtTime(o.start)}, ${fmtTemp(o.temp)} °C.${changed && o.schedule.editable ? ' Nejdřív uložte nebo zrušte změny.' : ''}</span>
       ${o.schedule.editable ? `<button type="button" class="btn small" data-a="carryOpen" data-k="${esc(o.schedule.id)}" ${changed ? 'disabled' : ''}>Upravit ${esc(schedName(o.schedule))}</button>` : ''}</div>`).join('');
   }
 
