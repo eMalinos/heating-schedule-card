@@ -346,19 +346,28 @@
     c13.remove();
 
     // --- editor review fixes ---
-    // a schedule with a 06:00 first start keeps it: carry-over part shown muted, not selectable, starts written back
+    // a schedule with a 06:00 first start keeps it: carry-over part shown muted, starts written back untouched; tapping it claims it as a slot from 00:00
     const late = { ...weekdays, timeslots: [{ ...weekdays.timeslots[0], start: '06:00', stop: '20:00' }, { ...weekdays.timeslots[0], start: '20:00', stop: '23:59', actions: [{ ...weekdays.timeslots[0].actions[0], service_data: { temperature: 19 } }] }] };
     items = [late];
     calls = [];
     const c14 = await mkCard(mkHass({ callApi: async (m, path, body) => { calls.push({ path, body }); } }), withValve);
     click(c14, '.row [data-a="open"]');
     const s14 = c14.shadowRoot;
-    r.carry = !!s14.querySelector('.edseg.carry') && !s14.querySelector('.edseg.carry[data-a]') && s14.querySelectorAll('button.edseg').length === 2
+    r.carry = !!s14.querySelector('.edseg.carry[data-a="carry"]') && s14.querySelectorAll('button.edseg:not(.carry)').length === 2
       && s14.querySelector('.edseg.carry').textContent === 'z předchozího dne';
     click(c14, '[data-a="day"][data-k="sat"]');
     click(c14, '[data-a="save"]');
     await tick(150);
     r.keepsStart = calls.length === 1 && calls[0].body.timeslots.map((t) => t.start).join() === '06:00:00,20:00:00' && calls[0].body.timeslots[1].stop === '23:59:00';
+    calls = [];
+    click(c14, '.row [data-a="open"]');
+    click(c14, '[data-a="carry"]');
+    r.claim = !s14.querySelector('.edseg.carry') && s14.querySelectorAll('button.edseg').length === 3
+      && s14.querySelector('button.edseg[aria-pressed="true"]')?.dataset.k === '0';
+    click(c14, '[data-a="save"]');
+    await tick(150);
+    r.claimSave = calls.length === 1 && calls[0].body.timeslots.map((t) => t.start).join() === '00:00:00,06:00:00,20:00:00'
+      && calls[0].body.timeslots[0].actions[0].service_data.temperature === 19;
 
     // stored version changed since the editor opened: no overwrite, "Načíst znovu" reloads it; paused / name come from the stored one
     items = [weekdays];
