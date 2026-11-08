@@ -292,7 +292,7 @@ const states = (o = {}) => ({
   [`sensor.heating_off_schedule_${C}`]: { state: '0', attributes: { window_open_climates: [] } },
   [`sensor.heating_valves_${C}`]: { state: '0', attributes: { phases: { [V]: ['normal', 'x', 21, false] }, forced: [], closed: [] } },
   [`sensor.heating_schedule_${C}`]: { state: 'auto', attributes: { targets: { [V]: 21 } } },
-  [`sensor.heating_program_${C}`]: { state: 'auto', attributes: { program_names: { auto: 'Výchozí' } } },
+  [`sensor.heating_program_${C}`]: { state: 'auto', attributes: { program_names: { auto: 'Normální' } } },
   [V]: { state: 'heat', attributes: { temperature: 21 } },
   ...o,
 });
@@ -302,7 +302,7 @@ test('nowState: normal', () => {
   const n = now(states());
   assert.equal(n.kind, 'normal');
   assert.equal(n.text, 'Teď 21 °C, od 20:00 19 °C');
-  assert.equal(n.sub, 'Běží program Výchozí · Po–Ne');
+  assert.equal(n.sub, 'Běží program Normální · Po–Ne');
   assert.deepEqual([n.temp, n.unit, n.tone, n.muted], ['21', '°C', 21, false]);
   assert.equal(now(states(), at(2026, 11, 2, 21)).text, 'Teď 19 °C, od zítra 00:00 18 °C');
 });
@@ -347,7 +347,7 @@ test('nowState: held phases, manual tolerance, fallback and no schedule', () => 
   assert.equal(now(states({ [V]: { state: 'heat', attributes: { temperature: 21.2 } } })).kind, 'manual');
   assert.equal(now(states(), at(2026, 11, 2, 14), { schedules: [] }).kind, 'none');
   const vac = now(states(), undefined, { program: 'vacation' });
-  assert.equal(vac.text, 'Teď 21 °C, od 20:00 19 °C podle Výchozího');
+  assert.equal(vac.text, 'Teď 21 °C, od 20:00 19 °C podle neděle Normálního');
   assert.equal(now(states({ [V]: { state: 'unavailable', attributes: {} } })).kind, 'normal'); // no temperature: never manual
 });
 
@@ -364,18 +364,36 @@ test('isFallbackProgram, barSegments, slotsSummary', () => {
   assert.equal(slotsSummary(vac), 'celý den 16 °C');
 });
 
-test('nowState: days label and "podle Výchozího" come from the schedule the slot belongs to', () => {
+test('nowState: days label and "podle Normálního" come from the schedule the slot belongs to', () => {
   // only a Friday schedule of the running program: at 00:30 on Saturday its evening slot still holds
   const fri = sched(THREE, { weekdays: ['fri'], tags: ['program:vacation'] });
   const n = nowState({ states: states(), circuit: C, valve: V, schedules: [fri], program: 'vacation', now: at(2026, 11, 7, 0, 30), nValves: 1 });
   assert.equal(n.text, 'Teď 19 °C, od Pá 00:00 18 °C'); // next change = next Friday, found within 7 days
   assert.equal(slotAt([fri], V, 'vacation', at(2026, 11, 7, 0, 30)).schedule, fri);
   assert.match(n.sub, /^Běží program vacation · Pá$/);
-  assert.ok(!n.text.includes('podle Výchozího'));
-  // the fallback flag follows the day: vacation has Friday only, Saturday runs on Výchozí
-  const sat = nowState({ states: states(), circuit: C, valve: V, schedules: [fri, sched(THREE, { weekdays: ['sat'] })], program: 'vacation', now: at(2026, 11, 7, 12), nValves: 1 });
-  assert.match(sat.text, /podle Výchozího$/);
+  assert.ok(!n.text.includes('podle Normálního'));
+  // the fallback flag follows the day: chata has Friday only, Saturday runs on Normální's Saturday
+  const fri2 = sched(THREE, { weekdays: ['fri'], tags: ['program:chata'] });
+  const sat = nowState({ states: states(), circuit: C, valve: V, schedules: [fri2, sched(THREE, { weekdays: ['sat'] })], program: 'chata', now: at(2026, 11, 7, 12), nValves: 1 });
+  assert.match(sat.text, /podle Normálního$/);
   assert.match(sat.sub, /· So$/);
+});
+
+test('effective: Dovolená without its own day runs by Normální\'s Sunday; swap inverts the week', () => {
+  const wk = sched([['00:00:00', '00:00:00', 21]], { weekdays: ['mon', 'tue', 'wed', 'thu', 'fri', 'sat'] });
+  const sun = sched([['00:00:00', '00:00:00', 15]], { weekdays: ['sun'] });
+  const vacTue = sched([['00:00:00', '00:00:00', 17]], { weekdays: ['tue'], tags: ['program:vacation'] });
+  const tue = at(2026, 11, 3, 12);
+  assert.equal(slotAt([wk, sun], V, 'vacation', tue).temp, 15);
+  assert.equal(slotAt([wk, sun], V, 'chata', tue).temp, 21);
+  assert.equal(slotAt([wk, sun, vacTue], V, 'vacation', tue).temp, 17); // its own Tuesday wins
+  const tueN = nowState({ states: states(), circuit: C, valve: V, schedules: [wk, sun], program: 'vacation', now: tue, nValves: 1 });
+  assert.match(tueN.text, /podle neděle Normálního$/);
+  const odd = sched([['00:00:00', '00:00:00', 16]], { tags: ['week:odd'] }), even = sched([['00:00:00', '00:00:00', 22]], { tags: ['week:even'] });
+  assert.equal(slotAt([odd, even], V, 'auto', at(2026, 11, 2, 12)).temp, 16); // odd week
+  assert.equal(slotAt([odd, even], V, 'auto', at(2026, 11, 2, 12), { swap: true }).temp, 22);
+  assert.equal(weekParity(at(2027, 1, 4)), 'even');
+  assert.equal(weekParity(at(2027, 1, 4), true), 'odd');
 });
 
 test('fmtTemp(null) is the same dash the tile uses for "no temperature"', () => {
@@ -433,7 +451,7 @@ test('carryOrigins: the weekdays whose morning another schedule\'s evening holds
   // every day from the same schedule: nothing to point at
   const daily = mk('d', ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'], wd.slots);
   assert.deepEqual(carryOrigins([daily], daily, mon), []);
-  // a program without a schedule for Sunday: Výchozí's evening holds Monday morning
+  // a program without a schedule for Sunday: Normální's evening holds Monday morning
   const vac = mk('vac', ['mon', 'tue', 'wed', 'thu', 'fri'], wd.slots, { program: 'vacation' });
   assert.deepEqual(carryOrigins([wd, we, vac], vac, mon).map((o) => [o.schedule.id, o.days.join()]), [['we', 'mon']]);
 });
@@ -494,7 +512,7 @@ const mk = (valve, program, days, slots = [[0, 20]], extra = {}) => {
     ...(extra.item ?? {}),
   });
 };
-const names = { auto: 'Výchozí', even: 'Sudý', vac: 'Dovolená' };
+const names = { auto: 'Normální', even: 'Sudý', vac: 'Dovolená' };
 const all = { [SRC]: ['auto', 'even', 'vac'], [A]: ['auto', 'even', 'vac'], [B]: ['auto', 'even'] };
 const plan = (schedules, o) => planCopy({ schedules, source: SRC, programsByValve: all, names, ...o });
 const shape = (p) => ({ add: p.add.map((m) => [m.valve, m.program, m.days.join(), m.slots.map((x) => x.start + '/' + x.temp).join()]), edit: p.edit.map((m) => [m.id, m.days.join()]), remove: p.remove });
@@ -509,7 +527,7 @@ test('planCopy whole valve + replace: target programs are replaced, others stay,
   });
   assert.equal(p.add[1].slots[0].start, 420, 'a first start after 00:00 is kept, no 00:00 slot invented');
   assert.deepEqual(Object.keys(p.notes), [A, B]);
-  assert.equal(p.notes[A], 'nahradí Výchozí (1 rozvrh); ostatní programy doplní.');
+  assert.equal(p.notes[A], 'nahradí Normální (1 rozvrh); ostatní programy doplní.');
   assert.equal(p.notes[B], 'dostane 3 rozvrhy, nic se nepřepíše.');
   const miss = plan([s3, mk(SRC, 'vac', ALL)], { mode: 'valve', programs: ['even', 'vac'], targets: [B] });
   assert.equal(miss.notes[B], 'přeskočeno, program Dovolená v jeho okruhu není.');
@@ -521,10 +539,10 @@ test('planCopy whole valve + fill: a program the target has is kept', () => {
   const a1 = mk(A, 'auto', ['mon']);
   const p = plan([s1, s2, a1], { mode: 'valve', programs: ['auto', 'vac'], targets: [A], conflict: 'fill' });
   assert.deepEqual(shape(p), { add: [[A, 'vac', ALL.join(), '0/20']], edit: [], remove: [] });
-  assert.equal(p.notes[A], 'Výchozí nechá být, doplní jen Dovolená.');
+  assert.equal(p.notes[A], 'Normální nechá být, doplní jen Dovolená.');
   const none = plan([s1, a1], { mode: 'valve', programs: ['auto'], targets: [A], conflict: 'fill' });
   assert.deepEqual(shape(none), { add: [], edit: [], remove: [] });
-  assert.equal(none.notes[A], 'Výchozí nechá být, doplní jen nic.');
+  assert.equal(none.notes[A], 'Normální nechá být, doplní jen nic.');
 });
 
 test('planCopy selected + replace: copied weekdays leave the target schedules, a schedule without days is removed', () => {
@@ -533,7 +551,7 @@ test('planCopy selected + replace: copied weekdays leave the target schedules, a
   const p = plan([s1, full, exact], { mode: 'one', scheduleIds: [s1.id], targets: [A, B], conflict: 'replace' });
   assert.deepEqual(shape(p), { add: [[A, 'auto', WORK.join(), '0/18,360/21'], [B, 'auto', WORK.join(), '0/18,360/21']], edit: [[full.id, 'sat,sun']], remove: [exact.id] });
   assert.deepEqual(p.edit[0].slots, full.slots);
-  assert.equal(p.notes[A], 'v Výchozí přepíše stejné dny, ostatní dny zůstanou.');
+  assert.equal(p.notes[A], 'v Normální přepíše stejné dny, ostatní dny zůstanou.');
   const clean = plan([s1], { mode: 'one', scheduleIds: [s1.id], targets: [A], conflict: 'replace' });
   assert.equal(clean.notes[A], 'dostane 1 rozvrh, nic se nepřepíše.');
 });
@@ -543,8 +561,8 @@ test('planCopy selected + fill: only the weekdays the target has free; nothing f
   const a1 = mk(A, 'auto', ['mon', 'tue', 'wed']), b1 = mk(B, 'auto', ALL);
   const p = plan([s1, a1, b1], { mode: 'one', scheduleIds: [s1.id], targets: [A, B], conflict: 'fill' });
   assert.deepEqual(shape(p), { add: [[A, 'auto', 'thu,fri', '0/20']], edit: [], remove: [] });
-  assert.equal(p.notes[A], 'doplní jen dny, které v Výchozí ještě nemá.');
-  assert.equal(p.notes[B], 'nic nedoplní, dny už v Výchozí má.');
+  assert.equal(p.notes[A], 'doplní jen dny, které v Normální ještě nemá.');
+  assert.equal(p.notes[B], 'nic nedoplní, dny už v Normální má.');
 });
 
 test('planCopy selected: target program, program missing in the circuit, two copies never share a weekday', () => {
@@ -584,17 +602,17 @@ test('planCopy: weekdays two selected schedules both want go to the first, the n
   const s1 = mk(SRC, 'auto', WORK), s2 = mk(SRC, 'even', ['tue', 'wed', 'thu', 'fri', 'sat']);
   const p = plan([s1, s2], { mode: 'one', scheduleIds: [s1.id, s2.id], targetProgram: 'vac', targets: [A], conflict: 'replace' });
   assert.deepEqual(shape(p).add, [[A, 'vac', WORK.join(), '0/20'], [A, 'vac', 'sat', '0/20']]);
-  assert.equal(p.notes[A], 'Út–Pá z programu Sudý se nekopírují, Výchozí je už má.');
+  assert.equal(p.notes[A], 'Út–Pá z programu Sudý se nekopírují, Normální je už má.');
 });
 
 test('planCopy: a read-only target schedule gets only its own note, it is not a "hit"', () => {
   const s1 = mk(SRC, 'auto', WORK);
   const aRo = mk(A, 'auto', ['mon'], [[0, 20]], { item: { repeat_type: 'single' } });
   const p = plan([s1, aRo], { mode: 'one', scheduleIds: [s1.id], targets: [A], conflict: 'replace' });
-  assert.equal(p.notes[A], 'Výchozí má rozvrh jen ke čtení, ten zůstane.');
+  assert.equal(p.notes[A], 'Normální má rozvrh jen ke čtení, ten zůstane.');
   assert.deepEqual(shape(p).add, [[A, 'auto', 'tue,wed,thu,fri', '0/20']]);
   const whole = plan([s1, aRo], { mode: 'valve', programs: ['auto'], targets: [A], conflict: 'fill' });
-  assert.equal(whole.notes[A], 'Výchozí má rozvrh jen ke čtení, ten zůstane.');
+  assert.equal(whole.notes[A], 'Normální má rozvrh jen ke čtení, ten zůstane.');
 });
 
 test('copyable: editable, not paused, single-valve schedules of the source', () => {
@@ -786,18 +804,19 @@ test('slugify / checkProgram: id from the name, reserved and used names, per-fie
   assert.equal(slugify('Chata u lesa!'), 'chata_u_lesa');
   assert.equal(slugify('  Dovolená Ždár  '), 'dovolena_zdar');
   assert.equal(slugify('!!!'), '');
-  const list = [{ id: 'auto', name: 'Výchozí' }, { id: 'vacation', name: 'Dovolená' }];
+  const list = [{ id: 'auto', name: 'Normální' }, { id: 'vacation', name: 'Dovolená' }];
   assert.deepEqual(checkProgram('Chata', list), { id: 'chata', error: '' });
   assert.equal(checkProgram('', list).error, 'Zadej název programu');
   assert.equal(checkProgram('   ', list).error, 'Zadej název programu');
   assert.equal(checkProgram('???', list).error, 'Název musí obsahovat písmeno nebo číslici');
-  assert.equal(checkProgram('Výchozí', list).error, 'Výchozí je vyhrazený název');
-  assert.equal(checkProgram('vychozi', list).error, 'Výchozí je vyhrazený název');
-  assert.equal(checkProgram('AUTO', list).error, 'Výchozí je vyhrazený název');
+  assert.equal(checkProgram('Normální', list).error, 'Tento název je vyhrazený');
+  assert.equal(checkProgram('vychozi', list).error, 'Tento název je vyhrazený');
+  assert.equal(checkProgram('AUTO', list).error, 'Tento název je vyhrazený');
   assert.equal(checkProgram('dovolená', list).error, 'Program s tímto názvem už existuje'); // a name already used
   assert.equal(checkProgram('Chata!', [...list, { id: 'chata', name: 'Hytta' }]).error, 'Program s tímto názvem už existuje'); // the id already used
   assert.equal(checkProgram('Dovolená!', list, 'vacation').error, '', 'renaming a program keeps its own id');
   assert.equal(checkProgram('Dovolená', list, 'vacation').error, '');
+  for (const n of ['vacation', 'Alternating', 'Normální', 'Lichý/sudý týden']) assert.equal(checkProgram(n, list).error, 'Tento název je vyhrazený');
   assert.equal(ymd(at(2026, 1, 5)), '2026-01-05');
 });
 

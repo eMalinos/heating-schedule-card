@@ -1,6 +1,6 @@
 // heating-schedule-card: weekly heating schedules of climate valves, stored by scheduler-component.
 // One plain ES module: no build step, no dependencies. Pure functions are exported for `node --test`.
-const VERSION = '0.2.6';
+const VERSION = '0.3.0';
 const isCal = (v) => typeof v === 'string' && v.startsWith('calendar.');
 const CZ_CALENDAR = 'calendar.czechia'; // the calendar the Holiday integration creates for Czechia
 
@@ -53,10 +53,11 @@ export function tempColor(t, dark = false) {
 /**
  * 'odd' | 'even' week of `date`: a strict every-7-days alternation counted from Monday 2025-12-29 (= odd), exactly as
  * heating's `heating_week_parity`. Never ISO week % 2: 2026 has ISO week 53, so after it the names differ from the ISO ones.
+ * `swap` (input_boolean.heating_week_swap_<circuit>) inverts it.
  */
-export function weekParity(date) {
+export function weekParity(date, swap = false) {
   const n = Math.floor((Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()) - Date.UTC(2025, 11, 29)) / 6048e5);
-  return n % 2 === 0 ? 'odd' : 'even';
+  return (n % 2 === 0) !== !!swap ? 'odd' : 'even';
 }
 
 /** ISO week number of `date` (display only, next to the parity). */
@@ -211,15 +212,16 @@ export function toPayload(model, existing = null) {
 /**
  * Schedules a valve uses on the calendar day `date`: the running program's non-paused schedules that include the weekday
  * and the week parity of that date, else `auto`'s (fallback per day, `isFallback` true then). `ctx.holidays` (Set of
- * 'YYYY-MM-DD'): a holiday counts as `sun`. A schedule with several valves counts for each of them (heating matches by
+ * 'YYYY-MM-DD'): a holiday counts as `sun`; `ctx.swap` inverts the week parity. Program `vacation` falls back to `auto`'s
+ * Sunday every day (as a holiday). A schedule with several valves counts for each of them (heating matches by
  * `entities` membership). Same rules as heating's `heating_slot_temp`.
  */
 export function effective(schedules, valve, program, date, ctx = {}) {
-  const day = ctx.holidays?.has(ymd(date)) ? 'sun' : dow(date), week = weekParity(date);
-  const on = schedules.filter((s) => s.valves.includes(valve) && !s.paused && s.days.includes(day) && (!s.week || s.week === week));
-  const own = on.filter((s) => s.program === program);
+  const day = ctx.holidays?.has(ymd(date)) ? 'sun' : dow(date), week = weekParity(date, ctx.swap);
+  const on = (d) => schedules.filter((s) => s.valves.includes(valve) && !s.paused && s.days.includes(d) && (!s.week || s.week === week));
+  const own = on(day).filter((s) => s.program === program);
   if (own.length || program === 'auto') return { schedules: own, isFallback: false };
-  return { schedules: on.filter((s) => s.program === 'auto'), isFallback: true };
+  return { schedules: on(program === 'vacation' ? 'sun' : day).filter((s) => s.program === 'auto'), isFallback: true };
 }
 
 const slotsOf = (list) => list.flatMap((s) => s.slots.map((x) => ({ ...x, schedule: s }))).sort((a, b) => a.start - b.start);
@@ -261,7 +263,7 @@ export function slotAt(schedules, valve, program, date, ctx = {}) {
 
 /**
  * Where the morning before `sched`'s late first start comes from on its weekdays (over the next two weeks, so both week
- * parities count): the last slot of the previous day's schedules, by the same rules as heating (program, Výchozí
+ * parities count): the last slot of the previous day's schedules, by the same rules as heating (program, Normální
  * fallback, weeks; holidays left out). -> [{schedule, days, start, temp}] for the schedules other than `sched`.
  */
 export function carryOrigins(schedules, sched, from = new Date()) {
@@ -386,7 +388,7 @@ export const copyable = (schedules, source) => schedules.filter((s) => s.editabl
  * target program is skipped with a note. `programsByValve` = {valve: [program ids of its circuit]} (absent = no check).
  */
 export function planCopy({ schedules, source, mode, programs = [], scheduleIds = [], targetProgram = 'same', targets = [], conflict = 'replace', programsByValve = null, names = {} }) {
-  const pn = (p) => names[p] || (p === 'auto' ? 'Výchozí' : p);
+  const pn = (p) => names[p] || (p === 'auto' ? 'Normální' : p);
   const list = (ps) => ps.map(pn).join(', ');
   const pool = copyable(schedules, source);
   const progs = new Set(programs), ids = new Set(scheduleIds);
@@ -560,13 +562,13 @@ export function nowState({ states = {}, circuit, valve, schedules, program, now 
       fmtTemp(target), { tone: target, btn: 'Podle rozvrhu' });
   }
   if (!slot) return tile('none', 'clockOutline', 'Žádný rozvrh', 'Pro tuto hlavici není žádný rozvrh', DASH, { muted: true });
-  const by = slot.isFallback ? ' podle Výchozího' : '';
+  const by = slot.isFallback ? (program === 'vacation' ? ' podle neděle Normálního' : ' podle Normálního') : '';
   const n = slot.next;
   const names = attrOf(states, `sensor.heating_program_${circuit}`, 'program_names') || {};
   return tile('normal', 'clockOutline',
     `Teď ${fmtTemp(slot.temp)} °C${n ? `, od ${when(n)}${fmtTime(n.start)} ${fmtTemp(n.temp)} °C` : ''}${by}`,
     ctx.holidays?.has(ymd(now)) ? 'Svátek · podle neděle'
-      : `Běží program ${names[program] || (program === 'auto' ? 'Výchozí' : program)}${slot.schedule ? ` · ${daysLabel(slot.schedule.days)}` : ''}`,
+      : `Běží program ${names[program] || (program === 'auto' ? 'Normální' : program)}${slot.schedule ? ` · ${daysLabel(slot.schedule.days)}` : ''}`,
     fmtTemp(slot.temp), { tone: slot.temp });
 }
 
@@ -581,15 +583,16 @@ const sameContent = (a, b) => a.program === b.program && (a.week ?? null) === (b
 export const slugify = (name) => String(name ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
 
 /**
- * Checks a program name against the circuit's programs (`list` = [{id, name}] including Výchozí): -> {id, error}.
- * `error` is '' when the name can be written: not empty, has a letter or digit, is not Výchozí / `auto`, and neither
+ * Checks a program name against the circuit's programs (`list` = [{id, name}] including Normální): -> {id, error}.
+ * `error` is '' when the name can be written: not empty, has a letter or digit, is not Normální / `auto` nor the heating's
+ * own ids (`vacation`, `alternating`), and neither
  * its name nor its id is used by another program (`exceptId` = the program being renamed).
  */
 export function checkProgram(name, list, exceptId = null) {
   const n = String(name ?? '').trim(), id = slugify(n), low = n.toLocaleLowerCase('cs');
   const error = !n ? 'Zadej název programu'
     : !id ? 'Název musí obsahovat písmeno nebo číslici'
-    : id === 'auto' || id === 'vychozi' ? 'Výchozí je vyhrazený název'
+    : ['auto', 'normalni', 'vychozi', 'alternating', 'lichy_sudy_tyden'].includes(id) || (id === 'vacation' && exceptId !== 'vacation') ? 'Tento název je vyhrazený'
     : list.some((p) => p.id !== exceptId && (p.id === id || String(p.name).trim().toLocaleLowerCase('cs') === low)) ? 'Program s tímto názvem už existuje' : '';
   return { id, error };
 }
@@ -996,18 +999,19 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
 
   _circuit() { return this._cfg.circuits.find((c) => c.id === this._cfg.valveCircuit[this._valve]); }
 
-  /** The holidays the heating rules use for this circuit: `{holidays: Set}`. */
+  /** The holidays and the week swap the heating rules use for this circuit: `{holidays: Set, swap}`. */
   _ctx(circuit = this._circuit()) {
+    const swap = this._hass?.states?.[`input_boolean.heating_week_swap_${circuit.id}`]?.state === 'on';
     // rebuilt only when the circuit, the mode or the holidays (by reference) change, not on every render
     const st = this._hass?.states, mode = st?.[`input_select.heating_holidays_${circuit.id}`]?.state, dates = st?.[`sensor.heating_programs_${circuit.id}`]?.attributes?.holidays;
     const m = this._holMemo?.get(circuit.id);
-    if (m && m.mode === mode && m.dates === dates) return { holidays: m.set };
+    if (m && m.mode === mode && m.dates === dates) return { holidays: m.set, swap };
     const set = holidayDates(st, circuit.id);
     (this._holMemo ??= new Map()).set(circuit.id, { mode, dates, set });
-    return { holidays: set };
+    return { holidays: set, swap };
   }
 
-  /** *Střídat lichý a sudý týden* is on for the circuit (it only shows the week controls; the tags always count). */
+  /** *Program Lichý/sudý týden* is on for the circuit (the program `alternating` exists; the tags always count). */
   _alternates(circuit = this._circuit()) { return this._hass?.states?.[`input_boolean.heating_week_alternation_${circuit.id}`]?.state === 'on'; }
 
   /** Everything the week view reads from the states; a change of any of it re-renders. */
@@ -1026,7 +1030,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
       a(`sensor.heating_valves_${id}`, 'phases')?.[v]?.[0], a(`sensor.heating_valves_${id}`, 'forced'), a(`sensor.heating_valves_${id}`, 'closed'),
       s(`sensor.heating_applying_${id}`), a(`sensor.heating_applying_${id}`, 'left'),
       a(`sensor.heating_schedule_${id}`, 'targets'), a(`sensor.heating_schedule_${id}`, 'holidays_next'),
-      s(`input_boolean.heating_week_alternation_${id}`), s(`input_select.heating_holidays_${id}`), s(`input_text.heating_holiday_calendar_${id}`),
+      s(`input_boolean.heating_week_alternation_${id}`), s(`input_boolean.heating_week_swap_${id}`), s(`input_select.heating_holidays_${id}`), s(`input_text.heating_holiday_calendar_${id}`),
       a(`sensor.heating_programs_${id}`, 'programs'), a(`sensor.heating_programs_${id}`, 'holidays'), a(`sensor.heating_programs_${id}`, 'holiday_error'),
       this._view === 'settings' ? Object.keys(st).filter((e) => e.startsWith('calendar.')) : null,
     ]);
@@ -1307,11 +1311,15 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     return this._write(id, () => this._save({ ...s, paused }, s));
   }
 
-  /** A program without schedules gets copies of the valve's Výchozí schedules, tagged with the program. All or nothing. */
+  /**
+   * A program without schedules gets copies of the valve's Normální schedules, tagged with the program; Dovolená gets
+   * Normální's Sunday schedules for every day (what it runs by now). All or nothing.
+   */
   _copyDefault() {
     const prog = this._prog, valve = this._valve;
     const groups = groupByProgram(this._schedules, valve);
-    const src = (groups.get('auto') || []).filter((s) => !s.paused && s.editable);
+    const src = (groups.get('auto') || []).filter((s) => !s.paused && s.editable && (prog !== 'vacation' || s.days.includes('sun')))
+      .map((s) => (prog === 'vacation' ? { ...s, days: [...DAYS] } : s));
     if (this._busy.has('copy') || !src.length || !isFallbackProgram(groups, prog)) return;
     return this._write('copy', async () => {
       const before = new Set((await loadSchedules(this._hass)).map((x) => x.id));
@@ -1324,7 +1332,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
 
   // ---------- copy ----------
 
-  /** `2 rozvrhy · Výchozí, Dovolená` / `bez rozvrhu`: what a valve has now. */
+  /** `2 rozvrhy · Normální, Dovolená` / `bez rozvrhu`: what a valve has now. */
   _valveSub(v, names) {
     const groups = [...groupByProgram(this._schedules, v)].filter(([, g]) => g.length);
     const n = groups.reduce((a, [, g]) => a + g.length, 0);
@@ -1461,7 +1469,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     else if (c.mode === 'valve') {
       which = `<div class="col"><span class="label">Které programy</span><div class="grid2">${ids.map((p) => {
         const n = pool.filter((s) => s.program === p).length, on = n > 0 && c.programs.includes(p);
-        return tile('cp-pt', p, on, !n, on ? 'checkCircle' : 'calendarWeek', ' cal', pname(p), sec(n ? plural(n, 'rozvrh', 'rozvrhy', 'rozvrhů') : p === 'auto' ? 'bez rozvrhu' : 'nemá vlastní · jede podle Výchozího'));
+        return tile('cp-pt', p, on, !n, on ? 'checkCircle' : 'calendarWeek', ' cal', pname(p), sec(n ? plural(n, 'rozvrh', 'rozvrhy', 'rozvrhů') : p === 'auto' ? 'bez rozvrhu' : 'nemá vlastní · jede podle Normálního'));
       }).join('')}</div></div>`;
     } else {
       const rows = ids.flatMap((p) => pool.filter((s) => s.program === p));
@@ -1514,7 +1522,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
   }
 
   /**
-   * The circuit's programs besides Výchozí, from `sensor.heating_program_<c>` (`programs` / `program_names`, legacy `program:` tags
+   * The circuit's programs besides Normální, from `sensor.heating_program_<c>` (`programs` / `program_names`, legacy `program:` tags
    * included: the one list the chips, editor and picker use). Entries keep the fields the stored list has besides id and name.
    */
   _progList(c) {
@@ -1552,6 +1560,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
 
   /** Writes the whole list through the circuit's script and waits until both program sensors show it (see `_programsShown`). */
   async _setPrograms(c, list) {
+    list = list.filter((p) => p.id !== 'alternating'); // the heating lists it while its switch is on
     await this._hass.callService('script', `heating_programs_set_${c.id}`, { programs: list });
     const wait = async (n) => { for (let i = 0; i < n; i++) { if (this._programsShown(c, list)) return true; await new Promise((r) => setTimeout(r, 250)); } return this._programsShown(c, list); };
     if (await wait(24)) return;
@@ -1570,14 +1579,14 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
 
   _addProgram() {
     const pg = this._pg, c = this._circuit(), list = this._progList(c);
-    const chk = checkProgram(pg.text, [{ id: 'auto', name: 'Výchozí' }, ...list]);
+    const chk = checkProgram(pg.text, [{ id: 'auto', name: 'Normální' }, ...list]);
     if (chk.error) return;
     return this._write('pg', async () => { await this._setPrograms(c, [...list, { id: chk.id, name: pg.text.trim() }]); pg.text = ''; });
   }
 
   _renameProgram(id) {
     const pg = this._pg, c = this._circuit(), list = this._progList(c);
-    const chk = checkProgram(pg.rtext, [{ id: 'auto', name: 'Výchozí' }, ...list], id);
+    const chk = checkProgram(pg.rtext, [{ id: 'auto', name: 'Normální' }, ...list], id);
     if (chk.error) return;
     return this._write('pg', async () => { await this._setPrograms(c, list.map((p) => (p.id === id ? { ...p, name: pg.rtext.trim() } : p))); pg.renaming = null; pg.rtext = ''; });
   }
@@ -1616,7 +1625,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
   _patchProgram() {
     const pg = this._pg, root = this.shadowRoot, c = this._circuit();
     if (!pg || !c) return;
-    const all = [{ id: 'auto', name: 'Výchozí' }, ...this._progList(c)];
+    const all = [{ id: 'auto', name: 'Normální' }, ...this._progList(c)];
     const busy = this._busy.has('pg');
     const put = (sel, text, dis) => { const el = root.querySelector(sel); if (!el) return; if (text != null) el.textContent = text; if (dis != null) el.disabled = dis; };
     const add = checkProgram(pg.text, all);
@@ -1631,12 +1640,13 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
 
   _programsHtml(circuit, errHtml) {
     const pg = this._pg, busy = this._busy.has('pg'), dis = busy ? 'disabled' : '';
-    const list = this._progList(circuit), all = [{ id: 'auto', name: 'Výchozí' }, ...list];
+    const list = this._progList(circuit), all = [{ id: 'auto', name: 'Normální' }, ...list];
     const add = checkProgram(pg.text, all);
     const rows = all.map((p) => {
       const st = this._progStats(circuit, p.id);
       const sub = p.id === 'auto' ? `${plural(st.valves, 'hlavice', 'hlavice', 'hlavic')} · ${plural(st.n, 'rozvrh', 'rozvrhy', 'rozvrhů')} · platí, když program nemá svůj`
-        : st.n ? `${plural(st.valves, 'hlavice', 'hlavice', 'hlavic')} · ${plural(st.n, 'rozvrh', 'rozvrhy', 'rozvrhů')}` : 'zatím bez rozvrhů · jede podle Výchozího';
+        : st.n ? `${plural(st.valves, 'hlavice', 'hlavice', 'hlavic')} · ${plural(st.n, 'rozvrh', 'rozvrhy', 'rozvrhů')}` : p.id === 'vacation' ? 'zatím bez rozvrhů · jede podle neděle Normálního'
+        : p.id === 'alternating' ? 'zatím bez rozvrhů · rozvrhy pro lichý a sudý týden, jinak Normální' : 'zatím bez rozvrhů · jede podle Normálního';
       const ic = `<span class="tic${p.id === 'auto' ? ' base' : ''}">${icon('calendarWeek', 18)}</span>`;
       if (p.id === 'auto') return `<div class="prow">${ic}<div class="tx"><b>${esc(p.name)}</b><span class="sec">${esc(sub)}</span></div></div>`;
       if (pg.renaming === p.id) {
@@ -1646,9 +1656,11 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
           <button type="button" class="round" data-a="pg-rcancel" data-k="" aria-label="Zrušit přejmenování" ${dis}>${icon('close')}</button>
           <span class="why" data-pg="rmsg" role="status" style="flex:1 1 100%">${esc(pg.rtext.trim() ? ren.error : '')}</span></div>`;
       }
+      // Dovolená can be renamed, not deleted; Lichý/sudý týden is switched in the settings
+      if (p.id === 'alternating') return `<div class="prow">${ic}<div class="tx"><b>${esc(p.name)}</b><span class="sec">${esc(sub)}</span></div></div>`;
       return `<div class="prow">${ic}<div class="tx"><b>${esc(p.name)}</b><span class="sec">${esc(sub)}</span></div>
         <button type="button" class="round" data-a="pg-ren" data-k="${esc(p.id)}" aria-label="Přejmenovat ${esc(p.name)}" ${dis}>${icon('pencil', 18)}</button>
-        <button type="button" class="round" data-a="pg-del" data-k="${esc(p.id)}" aria-label="Smazat program ${esc(p.name)}" ${dis}>${icon('deleteOutline', 18)}</button></div>`;
+        ${p.id === 'vacation' ? '' : `<button type="button" class="round" data-a="pg-del" data-k="${esc(p.id)}" aria-label="Smazat program ${esc(p.name)}" ${dis}>${icon('deleteOutline', 18)}</button>`}</div>`;
     }).join('');
     const cf = pg.confirm, cfName = cf && all.find((p) => p.id === cf.id)?.name;
     const confirm = cf ? `<div class="confirm" role="alertdialog" aria-label="Smazat program"><span>${cf.running ? RUNNING_MSG : cf.ro ? `Program ${esc(cfName)} má rozvrh jen ke čtení, ten smaž jinde.`
@@ -1664,7 +1676,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
         <div class="field"><input id="newprog" type="text" data-a="pg-text" data-k="" value="${esc(pg.text)}" placeholder="Název, např. Chata" autocomplete="off" ${dis}>
           <button type="button" class="btn primary" data-a="pg-add" data-k="" ${add.error || busy ? 'disabled' : ''}>${icon('plus')}Přidat</button></div>
         <span class="why" data-pg="msg" role="status">${esc(pg.text.trim() ? add.error : '')}</span>
-        <span class="sec">Nový program jede podle Výchozího, dokud mu nepřidáte vlastní rozvrh. Program se vybírá v kartě okruhu.</span></div>`;
+        <span class="sec">Nový program jede podle Normálního, dokud mu nepřidáte vlastní rozvrh. Program se vybírá v kartě okruhu.</span></div>`;
   }
 
   // ---------- settings ----------
@@ -1675,6 +1687,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     if (a === 'st-back') { this._view = 'week'; this._render(true); }
     else if (a === 'st-prog') this._openPrograms('settings');
     else if (a === 'st-alt') call('input_boolean', 'toggle', { entity_id: `input_boolean.heating_week_alternation_${id}` });
+    else if (a === 'st-swap') call('input_boolean', 'toggle', { entity_id: `input_boolean.heating_week_swap_${id}` });
     else if (a === 'st-hol') {
       const st = this._hass.states, calEnt = `input_text.heating_holiday_calendar_${id}`, cur = st[calEnt]?.state;
       if (k === (st[`input_select.heating_holidays_${id}`]?.state === 'calendar' ? 'calendar' : 'none')) return; // the active tab
@@ -1692,7 +1705,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     const id = circuit.id, st = this._hass?.states ?? {}, att = (e, a) => st[e]?.attributes?.[a];
     const alt = this._alternates(circuit), mode = st[`input_select.heating_holidays_${id}`]?.state === 'calendar' ? 'calendar' : 'none'; // anything else shows as Žádné
     const stored = st[`input_text.heating_holiday_calendar_${id}`]?.state, cal = isCal(stored) ? stored : ''; // only the stored value is shown
-    const parity = weekParity(new Date());
+    const swap = this._ctx(circuit).swap, parity = weekParity(new Date(), swap);
     const calendars = Object.keys(st).filter((e) => e.startsWith('calendar.'));
     if (cal && !calendars.includes(cal)) calendars.unshift(cal);
     const next = (Array.isArray(att(`sensor.heating_schedule_${id}`, 'holidays_next')) ? att(`sensor.heating_schedule_${id}`, 'holidays_next') : []);
@@ -1710,12 +1723,14 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
         <div class="t"><span class="sec">Okruh ${esc(circuitName(this._hass, circuit))}</span><span class="title">Nastavení rozvrhů</span></div>
       </div>
       ${errHtml}
-      <div class="swrow"><div class="tx"><b>Střídat lichý a sudý týden</b><span class="sec">Rozvrh pak platí každý týden, jen v lichém, nebo jen v sudém. Teď je ${WEEK_LABEL[parity]} týden.</span></div>
-        <button type="button" class="switch" role="switch" aria-checked="${alt}" aria-label="Střídat lichý a sudý týden" data-a="st-alt" data-k="" ${st[`input_boolean.heating_week_alternation_${id}`] ? '' : 'disabled'}></button></div>
+      <div class="swrow"><div class="tx"><b>Program Lichý/sudý týden</b><span class="sec">Jeho rozvrhy platí každý týden, jen v lichém, nebo jen v sudém; co nemá, jede podle Normálního. Teď je ${WEEK_LABEL[parity]} týden.</span></div>
+        <button type="button" class="switch" role="switch" aria-checked="${alt}" aria-label="Program Lichý/sudý týden" data-a="st-alt" data-k="" ${st[`input_boolean.heating_week_alternation_${id}`] ? '' : 'disabled'}></button></div>
+      ${alt || swap ? `<div class="swrow"><div class="tx"><b>Prohodit lichý a sudý týden</b><span class="sec">Týdny se střídají po 7 dnech. Nesedí-li s kalendářem (po roce s 53 týdny), prohoďte je.</span></div>
+        <button type="button" class="switch" role="switch" aria-checked="${swap}" aria-label="Prohodit lichý a sudý týden" data-a="st-swap" data-k="" ${st[`input_boolean.heating_week_swap_${id}`] ? '' : 'disabled'}></button></div>` : ''}
       <div class="col"><span class="label">Státní svátky</span>
         <div class="tabs">${tab('none', 'Žádné')}${tab('calendar', 'Z kalendáře')}</div>
         ${picker}${hols}</div>
-      <button type="button" class="tile link" data-a="st-prog" data-k=""><span class="tx"><b>Programy</b><span class="sec">${esc(['Výchozí', ...progs.map((p) => p.name)].join(', '))}</span></span>${icon('chevronRight')}</button>`;
+      <button type="button" class="tile link" data-a="st-prog" data-k=""><span class="tx"><b>Programy</b><span class="sec">${esc(['Normální', ...progs.map((p) => p.name)].join(', '))}</span></span>${icon('chevronRight')}</button>`;
   }
 
   // ---------- render ----------
@@ -1727,7 +1742,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     const ids = p?.attributes?.programs?.length ? [...p.attributes.programs] : ['auto'];
     if (!ids.includes('auto')) ids.unshift('auto');
     if (!ids.includes(running)) ids.push(running);
-    const names = { auto: 'Výchozí', ...(p?.attributes?.program_names || {}) };
+    const names = { auto: 'Normální', ...(p?.attributes?.program_names || {}) };
     return { running, list: ids.map((id) => ({ id, name: names[id] || id })) };
   }
 
@@ -1753,7 +1768,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     const prog = this._prog, progName = list.find((p) => p.id === prog).name;
     const title = states[valve]?.attributes?.friendly_name || valve;
 
-    const ctx = this._ctx(circuit), alt = this._alternates(circuit), parity = weekParity(now);
+    const ctx = this._ctx(circuit), alt = this._alternates(circuit), parity = weekParity(now, ctx.swap);
     const ns = nowState({ states, circuit: circuit.id, valve, schedules: this._schedules, program: running, now, nValves: circuit.valves.length, ctx });
     const toneCss = ns.tone == null ? '' : ns.tone === 'cold' ? 'var(--c-cold)' : ns.tone === 'warm' ? 'var(--c-warm)' : ns.tone === 'accent' ? 'var(--c-accent)' : tempColor(ns.tone, dark);
 
@@ -1782,13 +1797,13 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
       main = `<div class="rows">${own.map(row).join('') || '<span class="sec">Žádný rozvrh</span>'}</div>
         <button type="button" class="btn wide" data-a="add">${icon('plus')}Přidat dny s jiným rozvrhem</button>`;
     } else {
-      const dflt = (groups.get('auto') || []).filter((s) => !s.paused);
+      const dflt = (groups.get('auto') || []).filter((s) => !s.paused && (prog !== 'vacation' || s.days.includes('sun')));
       const copyable = dflt.some((s) => s.editable);
       main = `<div class="note">
           <span class="ic">${icon('calendarWeek')}</span>
-          <div class="tx"><b>${esc(progName)} používá výchozí rozvrh</b><span class="sec">Hlavice pojede podle Výchozího, dokud tu nebude vlastní rozvrh.</span></div>
+          <div class="tx"><b>${esc(progName)} používá ${prog === 'vacation' ? 'neděli Normálního' : 'Normální rozvrh'}</b><span class="sec">Hlavice pojede ${prog === 'vacation' ? 'každý den podle neděle Normálního' : 'podle Normálního'}, dokud tu nebude vlastní rozvrh.</span></div>
         </div>
-        <div class="rows dim">${dflt.map((s) => `<div class="row${s.editable ? '' : ' ro'}"><div class="top"><span class="open"><span class="lbl"><b>${esc(daysLabel(s.days))}</b>${pill(s)}</span><span class="sec">Výchozí</span></span></div>${bar(s, false)}</div>`).join('') || '<span class="sec">Výchozí rozvrh nemá žádné úseky.</span>'}</div>
+        <div class="rows dim">${dflt.map((s) => `<div class="row${s.editable ? '' : ' ro'}"><div class="top"><span class="open"><span class="lbl"><b>${esc(prog === 'vacation' ? 'Každý den' : daysLabel(s.days))}</b>${pill(s)}</span><span class="sec">${prog === 'vacation' ? 'neděle Normálního' : 'Normální'}</span></span></div>${bar(s, false)}</div>`).join('') || '<span class="sec">Normální rozvrh nemá žádné úseky.</span>'}</div>
         <button type="button" class="btn primary wide" data-a="copyDefault" ${copyable && !this._busy.has('copy') ? '' : 'disabled'}>${icon('contentCopy')}Vlastní rozvrh pro ${esc(progName.toLowerCase())}</button>`;
     }
 
@@ -1852,7 +1867,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
   _carryNotes(ed) {
     const model = { ...ed.existing, id: ed.existing?.id ?? null, valve: ed.valves[0], valves: ed.valves, program: ed.program, week: ed.week, days: ed.days, slots: ed.slots, paused: false };
     const changed = this._edChanged(ed);
-    return carryOrigins(this._schedules, model).map((o) => `<div class="carrynote"><span>${daysLabel(o.days)} ráno pokračuje rozvrh <b>${esc(schedName(o.schedule))}</b>${o.schedule.program !== ed.program ? ' (Výchozí)' : ''} od ${fmtTime(o.start)}, ${fmtTemp(o.temp)} °C.${changed && o.schedule.editable ? ' Nejdřív uložte nebo zrušte změny.' : ''}</span>
+    return carryOrigins(this._schedules, model).map((o) => `<div class="carrynote"><span>${daysLabel(o.days)} ráno pokračuje rozvrh <b>${esc(schedName(o.schedule))}</b>${o.schedule.program !== ed.program ? ' (Normální)' : ''} od ${fmtTime(o.start)}, ${fmtTemp(o.temp)} °C.${changed && o.schedule.editable ? ' Nejdřív uložte nebo zrušte změny.' : ''}</span>
       ${o.schedule.editable ? `<button type="button" class="btn small" data-a="carryOpen" data-k="${esc(o.schedule.id)}" ${changed ? 'disabled' : ''}>Upravit ${esc(schedName(o.schedule))}</button>` : ''}</div>`).join('');
   }
 
@@ -1873,11 +1888,12 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     const pos = (m) => `calc(5px + (100% - 10px) * ${(m / DAY_END).toFixed(4)})`;
     const handles = sl.map((x, n) => (x.start > 0 ? `<span class="handle" data-h="${n}" style="left:${pos(x.start)}" title="Přetáhněte"></span>` : '')).join('');
     const hlabels = sl.filter((x) => x.start > 0).map((x) => `<span style="left:${pos(x.start)}">${Math.floor(x.start / 60)}:${pad(x.start % 60)}</span>`).join('');
-    // Opakování: tabs while the alternation is on; an existing week tag stays visible (and kept) when it is off
-    const repeatHtml = this._alternates()
+    // Opakování: tabs in the program Lichý/sudý týden while it is on, and for a schedule that already has a week tag (to change
+    // or drop it); elsewhere none
+    const repeatHtml = (ed.program === 'alternating' && this._alternates()) || (ed.existing?.week && ed.program !== 'alternating')
       ? `<div class="col"><span class="label">Opakování</span><div class="tabs">${[['all', 'Každý týden'], ['odd', 'Lichý'], ['even', 'Sudý']].map(([k, n]) =>
         `<button type="button" class="tab" data-a="wk" data-k="${k}" aria-pressed="${(ed.week ?? 'all') === k}">${n}</button>`).join('')}</div></div>`
-      : ed.week ? `<div class="col"><span class="label">Opakování</span><span class="repro">${WEEK_LABEL[ed.week]} týden · střídání je vypnuté</span></div>` : '';
+      : ed.week ? `<div class="col"><span class="label">Opakování</span><span class="repro">${WEEK_LABEL[ed.week]} týden</span></div>` : '';
     const daysHtml = DAYS.map((d) => `<button type="button" class="day" data-a="day" data-k="${d}" aria-pressed="${ed.days.includes(d)}">${DAY_LABELS[d]}</button>`).join('');
     return `<div class="head">
         <button type="button" class="round" data-a="back" data-k="" aria-label="Zpět" ${busy ? 'disabled' : ''}>${icon('chevronLeft')}</button>
