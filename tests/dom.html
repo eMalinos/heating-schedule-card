@@ -248,7 +248,7 @@
     click(c9, '[data-a="sdn"]');
     click(c9, '[data-a="day"][data-k="sat"]');
     r.edFocusKept = sr.activeElement === null || sr.activeElement.dataset.a === 'day'; // no focus loss errors
-    r.edState = sr.querySelector('.dial b').textContent.startsWith('22') && sr.textContent.includes('11:45–24:00');
+    r.edState = sr.querySelector('.tbig b').textContent.startsWith('22') && sr.textContent.includes('11:45–24:00');
     click(c9, '[data-a="save"]');
     await tick(150);
     const b = calls[0]?.body;
@@ -261,7 +261,7 @@
     calls = [];
     click(c9, '[data-a="add"]');
     r.newEd = sr.textContent.includes('Nový rozvrh') && [...sr.querySelectorAll('.day[aria-pressed="true"]')].map((x) => x.textContent).join() === 'So,Ne'
-      && sr.querySelector('.dial b').textContent.startsWith('20') && !sr.querySelector('[data-a="del"]');
+      && sr.querySelector('.tbig b').textContent.startsWith('20') && !sr.querySelector('[data-a="del"]');
     click(c9, '[data-a="save"]');
     await tick(150);
     r.newSave = calls.length === 1 && calls[0].path === 'scheduler/add' && !('schedule_id' in calls[0].body) && calls[0].body.weekdays.join() === 'sat,sun'
@@ -409,7 +409,7 @@
     await tick(150);
     r.stale = calls.length === 0 && s15.textContent.includes('Rozvrh se mezitím změnil') && !btnOn(c15, '[data-a="save"]');
     click(c15, '[data-a="reload"]');
-    r.reloadStale = !!s15.querySelector('.edbar') && !s15.querySelector('.stale') && s15.querySelector('.dial b').textContent.startsWith('17') && btnOn(c15, '[data-a="save"]');
+    r.reloadStale = !!s15.querySelector('.edbar') && !s15.querySelector('.stale') && s15.querySelector('.tbig b').textContent.startsWith('17') && btnOn(c15, '[data-a="save"]');
     // delete confirmation names the stored days
     click(c15, '[data-a="day"][data-k="mon"]');
     click(c15, '[data-a="del"]');

@@ -5,7 +5,7 @@ import {
   normalizeConfig, circuitName, parseSchedule, toPayload, effective, slotAt, groupByProgram, daysLabel, tempColor, fmtTemp, fmtTime,
   discoverCircuits, loadSchedules, saveSchedule, removeSchedule, nowState, DASH, isFallbackProgram, barSegments, slotsSummary,
   normalizeSlots, carryOrigins, splitSlot, removeSlot, moveBoundary, setTemp, daysConflict, planCopy, copyable,
-  weekParity, isoWeek, holidayDates, slugify, checkProgram, ymd, dialTemp,
+  weekParity, isoWeek, holidayDates, slugify, checkProgram, ymd, scaleTemp,
 } from '../dist/heating-schedule-card.js';
 
 process.env.TZ = 'Europe/Prague'; // the DST test needs a zone with a spring-forward day
@@ -837,11 +837,11 @@ test('planCopy never plans an add or an edit without days (Po lichý + Po sudý 
   assert.deepEqual([r2.edit, r2.remove], [[], ['t']]);
 });
 
-test('dialTemp: angle on the 270° arc -> 15–25 °C, the bottom gap snaps to the nearer end', () => {
-  assert.equal(dialTemp(0, -1), 20); // top
-  assert.equal(dialTemp(-1, 1), 15); // start, bottom left
-  assert.equal(dialTemp(1, 1), 25); // end, bottom right
-  assert.equal(dialTemp(1, 0), 23.5); // right = 225° of 270°
-  assert.equal(dialTemp(-0.1, 1), 15);
-  assert.equal(dialTemp(0.1, 1), 25);
+test('scaleTemp: x on the scale -> 15–25 °C in 0.5, clamped', () => {
+  assert.equal(scaleTemp(0, 200), 15);
+  assert.equal(scaleTemp(100, 200), 20);
+  assert.equal(scaleTemp(200, 200), 25);
+  assert.equal(scaleTemp(131, 200), 21.5);
+  assert.equal(scaleTemp(-20, 200), 15);
+  assert.equal(scaleTemp(260, 200), 25);
 });
