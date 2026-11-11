@@ -1898,7 +1898,8 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
       aria-label="Úsek ${fmtTime(x.start)}–${fmtTime(x.end)}, ${fmtTemp(x.temp)} °C">${x.end - x.start >= 90 ? `${fmtTemp(x.temp)}°` : ''}</button>`).join('');
     const pos = (m) => `calc(5px + (100% - 10px) * ${(m / DAY_END).toFixed(4)})`;
     const handles = sl.map((x, n) => (x.start > 0 ? `<span class="handle" data-h="${n}" style="left:${pos(x.start)}" title="Přetáhněte"></span>` : '')).join('');
-    const hlabels = sl.filter((x) => x.start > 0).map((x) => `<span style="left:${pos(x.start)}">${Math.floor(x.start / 60)}:${pad(x.start % 60)}</span>`).join('');
+    let prev = -Infinity; // a label closer than 90 min to the previous one would overlap it (the panel shows the exact times)
+    const hlabels = sl.filter((x) => x.start > 0 && x.start - prev >= 90 && (prev = x.start)).map((x) => `<span style="left:${pos(x.start)}">${Math.floor(x.start / 60)}:${pad(x.start % 60)}</span>`).join('');
     // Opakování: tabs in the program Lichý/sudý týden while it is on, and for a schedule that already has a week tag (to change
     // or drop it); elsewhere none
     const repeatHtml = (ed.program === 'alternating' && this._alternates()) || (ed.existing?.week && ed.program !== 'alternating')
