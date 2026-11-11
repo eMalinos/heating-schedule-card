@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import {
   normalizeConfig, circuitName, parseSchedule, toPayload, effective, slotAt, groupByProgram, daysLabel, tempColor, fmtTemp, fmtTime,
   discoverCircuits, loadSchedules, saveSchedule, removeSchedule, nowState, DASH, isFallbackProgram, barSegments, slotsSummary,
-  normalizeSlots, carryOrigins, splitSlot, removeSlot, moveBoundary, setTemp, daysConflict, planCopy, copyable,
+  normalizeSlots, carryOrigins, splitSlot, removeSlot, moveBoundary, slotIndexAt, setTemp, daysConflict, planCopy, copyable,
   weekParity, isoWeek, holidayDates, slugify, checkProgram, ymd, scaleTemp,
 } from '../dist/heating-schedule-card.js';
 
@@ -844,4 +844,12 @@ test('scaleTemp: x on the scale -> 15–25 °C in 0.5, clamped', () => {
   assert.equal(scaleTemp(131, 200), 21.5);
   assert.equal(scaleTemp(-20, 200), 15);
   assert.equal(scaleTemp(260, 200), 25);
+});
+
+test('slotIndexAt: slot under a minute, before the first start = the last slot', () => {
+  const sl = [{ start: 360, end: 390, temp: 21 }, { start: 390, end: 1320, temp: 19 }, { start: 1320, end: 1440, temp: 18 }];
+  assert.equal(slotIndexAt(sl, 375), 0); // a 30 min slot
+  assert.equal(slotIndexAt(sl, 390), 1);
+  assert.equal(slotIndexAt(sl, 1400), 2);
+  assert.equal(slotIndexAt(sl, 100), 2); // the carried-over morning
 });
