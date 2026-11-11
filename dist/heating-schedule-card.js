@@ -1,6 +1,6 @@
 // heating-schedule-card: weekly heating schedules of climate valves, stored by scheduler-component.
 // One plain ES module: no build step, no dependencies. Pure functions are exported for `node --test`.
-const VERSION = '0.4.0';
+const VERSION = '0.4.1';
 const isCal = (v) => typeof v === 'string' && v.startsWith('calendar.');
 const CZ_CALENDAR = 'calendar.czechia'; // the calendar the Holiday integration creates for Czechia
 
@@ -326,6 +326,12 @@ export function removeSlot(slots, i) {
   if (slots.length < 2 || !slots[i]) return slots;
   if (i === 0) return [{ ...slots[1], start: slots[0].start }, ...slots.slice(2)];
   return [...slots.slice(0, i - 1), { ...slots[i - 1], end: slots[i].end }, ...slots.slice(i + 1)];
+}
+
+/** Index of the editor slot at minute m; before the first start it is the last slot (it carries past midnight). */
+export function slotIndexAt(slots, m) {
+  const i = slots.findLastIndex((x) => x.start <= m);
+  return i < 0 ? slots.length - 1 : i;
 }
 
 /**
@@ -1044,13 +1050,17 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
     if (this._view !== 'editor' || !ed || e.button || (!h && !scale)) return;
     e.preventDefault();
     const box = (h ? h.parentElement : scale).getBoundingClientRect(), step = this._cfg.timeStep;
-    const i = h ? (ed.sel = Number(h.dataset.h)) : ed.sel, x0 = e.clientX, m0 = ed.slots[i].start;
+    const i = h ? Number(h.dataset.h) : ed.sel, x0 = e.clientX, m0 = ed.slots[i].start;
+    let moved = !h; // a handle drags only after a few px; a tap on it selects the slot under the finger
     const move = (ev) => {
-      if (h) ed.slots = moveBoundary(ed.slots, i, Math.round((m0 + (ev.clientX - x0) / (box.width - 10) * DAY_END) / step) * step - ed.slots[i].start, step);
+      if (h && !moved && Math.abs(ev.clientX - x0) < 4) return;
+      moved = true;
+      if (h) { ed.sel = i; ed.slots = moveBoundary(ed.slots, i, Math.round((m0 + (ev.clientX - x0) / (box.width - 10) * DAY_END) / step) * step - ed.slots[i].start, step); }
       else ed.slots = setTemp(ed.slots, i, scaleTemp(ev.clientX - box.left, box.width));
       this._render(true);
     };
     const up = () => {
+      if (!moved) { ed.sel = slotIndexAt(ed.slots, (x0 - box.left - 5) / (box.width - 10) * DAY_END); this._render(true); }
       for (const [t, fn] of [['pointermove', move], ['pointerup', up], ['pointercancel', up]]) removeEventListener(t, fn);
       this._dragged = true; setTimeout(() => { this._dragged = false; }); // swallow the click that ends the drag
     };
@@ -1185,6 +1195,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
       if (!ed.existing && !ed.daysTouched) ed.days = this._freeDays(ed.valves, ed.program, ed.week);
     }
     else if (a === 'sel') ed.sel = i;
+    else if (a === 'prev' || a === 'next') ed.sel = Math.min(ed.slots.length - 1, Math.max(0, ed.sel + (a === 'prev' ? -1 : 1)));
     else if (a === 'carry') ed.sel = ed.slots.length - 1; // the carried-over morning is the last slot running past midnight
     else if (a === 'carryOpen') {
       // the schedule the morning really comes from on some days: its editor, its evening slot selected
@@ -1911,7 +1922,7 @@ class HeatingScheduleCard extends (globalThis.HTMLElement ?? class {}) {
       ${repeatHtml}
       <div class="col"><span class="label">Průběh dne</span><div class="edbar">${segs}${handles}</div><div class="hlabels">${hlabels}</div>${wrap ? this._carryNotes(ed) : ''}</div>
       <div class="panel">
-        <div class="l"><span class="label">Úsek ${fmtTime(cur.start)}–${fmtTime(end)}${wrap ? ' další den' : ''}</span>
+        <div class="l"><div class="lrow">${btn('prev', 'Předchozí úsek', icon('chevronLeft', 18), ed.sel === 0)}<span class="label">Úsek ${fmtTime(cur.start)}–${fmtTime(end)}${wrap ? ' další den' : ''}</span>${btn('next', 'Další úsek', icon('chevronRight', 18), ed.sel === last)}</div>
           ${stepTile('Začátek', cur.start, 'sdn', 'sup', ed.sel > 0 || cur.start > 0)}${stepTile(wrap ? 'Konec další den' : 'Konec', end, 'edn', 'eup', ed.sel < last || wrap)}
           <div class="grid2">
             <button type="button" class="btn small" data-a="split" data-k="" ${cur.end - cur.start >= 2 * step ? '' : 'disabled'}><span style="color:var(--c-accent);display:inline-flex">${icon('split', 18)}</span>Rozdělit</button>
